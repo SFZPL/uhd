@@ -62,12 +62,14 @@ if 'designer_email_mapping' not in st.session_state:
     st.session_state.designer_email_mapping = {}
 if 'smtp_server' not in st.session_state:
     st.session_state.smtp_server = "smtp.gmail.com"
+# Email settings
 if 'smtp_port' not in st.session_state:
     st.session_state.smtp_port = 587
 if 'smtp_username' not in st.session_state:
     st.session_state.smtp_username = ""
 if 'smtp_password' not in st.session_state:
     st.session_state.smtp_password = ""
+
 # Teams webhook settings
 if 'webhooks_enabled' not in st.session_state:
     st.session_state.webhooks_enabled = False
@@ -75,6 +77,11 @@ if 'designer_webhook_mapping' not in st.session_state:
     st.session_state.designer_webhook_mapping = {}
 if 'test_webhook_url' not in st.session_state:
     st.session_state.test_webhook_url = ""
+
+# Load webhook mappings from secrets if they exist
+if hasattr(st.secrets, "WEBHOOKS"):
+    for designer, webhook_url in st.secrets.WEBHOOKS.items():
+        st.session_state.designer_webhook_mapping[designer] = webhook_url
 
 # Add reference date for cutoff of historical tasks
 if 'reference_date' not in st.session_state:
