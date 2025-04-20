@@ -83,6 +83,11 @@ if hasattr(st.secrets, "WEBHOOKS"):
     for designer, webhook_url in st.secrets.WEBHOOKS.items():
         st.session_state.designer_webhook_mapping[designer] = webhook_url
 
+# Load designer email mappings from secrets if they exist
+if hasattr(st.secrets, "DESIGNER_EMAILS"):
+    for designer, email in st.secrets.DESIGNER_EMAILS.items():
+        st.session_state.designer_email_mapping[designer] = email
+
 # Add reference date for cutoff of historical tasks
 if 'reference_date' not in st.session_state:
     st.session_state.reference_date = date.today() - timedelta(days=7)  # Default to 7 days ago
