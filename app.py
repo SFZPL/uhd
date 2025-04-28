@@ -509,89 +509,84 @@ def send_designer_email(designer_name, designer_email, report_date, tasks, smtp_
                 days_overdue = (report_date - task_date).days
                 max_days_overdue = max(max_days_overdue, days_overdue)
         
-        # Add urgency to subject line based on age of most overdue task
-        urgency_prefix = ""
+        # Set subject line based on days overdue
         if max_days_overdue >= 2:
-            urgency_prefix = "IMMEDIATE ACTION REQUIRED: "
-        elif max_days_overdue == 1:
-            urgency_prefix = "REMINDER: "
-            
-        msg['Subject'] = f"{urgency_prefix}Missing Timesheet Alert - {report_date.strftime('%Y-%m-%d')}"
+            msg['Subject'] = "Heads-Up: You've Missed Logging Hours for 2 Days"
+        else:
+            msg['Subject'] = "Quick Nudge – Log Your Hours"
         
-        # Create urgency message based on most overdue task
-        urgency_message = ""
-        if max_days_overdue >= 2:
-            urgency_message = f"""
-            <p style="color: red; font-weight: bold; font-size: 16px; background-color: #ffeeee; padding: 10px; border: 2px solid red;">
-            URGENT ACTION REQUIRED: You have tasks that are {max_days_overdue} days overdue. 
-            Your managers will be notified about these missing timesheets immediately.
-            Please complete your timesheets as a top priority.
-            </p>
-            """
-        elif max_days_overdue == 1:
-            urgency_message = """
-            <p style="color: orange; font-weight: bold; padding: 8px; background-color: #fff8ee; border: 1px solid orange;">
-            REMINDER: These tasks are from yesterday and need immediate attention. Please log your 
-            time as soon as possible.
-            </p>
-            """
-        
-        # Create email body text
+        # Create email body based on days overdue
         date_str = report_date.strftime('%Y-%m-%d')
         
-        body = f"""
-        <html>
-        <body>
-        <h2>Missing Timesheet Alert - {date_str}</h2>
-        <p>Hello {designer_name},</p>
-        
-        <p>You have {len(tasks)} task(s) without timesheet entries for {date_str}. 
-        Please log your time as soon as possible.</p>
-        
-        {urgency_message}
-        
-        <h3>Tasks missing timesheet entries:</h3>
-        <table border="1" cellpadding="5">
-        <tr>
-            <th>Project</th>
-            <th>Task</th>
-            <th>Time</th>
-            <th>Allocated Hours</th>
-            <th>Days Overdue</th>
-        </tr>
-        """
-        
-        # Add tasks to the email with individual overdue status
-        for task in tasks:
-            # Calculate or extract days overdue for this specific task
-            days_overdue = task.get('Days Overdue', 0)
-            if days_overdue == 0 and 'Date' in task:
-                task_date = datetime.strptime(task['Date'], "%Y-%m-%d").date()
-                days_overdue = (report_date - task_date).days
+        if max_days_overdue >= 2:
+            # 2+ days overdue template
+            body = f"""
+            <html>
+            <body style="font-family: Arial, sans-serif; line-height: 1.5;">
+            <p>Hi {designer_name},</p>
             
-            # Create a style based on days overdue
-            urgency_style = ""
-            if days_overdue >= 2:
-                urgency_style = 'style="background-color: #ffeeee; color: red; font-weight: bold;"'
-            elif days_overdue == 1:
-                urgency_style = 'style="background-color: #fff8ee; color: orange;"'
-                
-            body += f"""
-            <tr>
-                <td>{task.get('Project', 'Unknown')}</td>
-                <td>{task.get('Task', 'Unknown')}</td>
-                <td>{task.get('Start Time', 'Unknown')} - {task.get('End Time', 'Unknown')}</td>
-                <td>{task.get('Allocated Hours', 0)}</td>
-                <td {urgency_style}>{days_overdue} days</td>
-            </tr>
+            <p>It looks like no hours have been logged for the past two days for the following task(s):</p>
             """
             
-        body += """
-        </table>
-        <p>This is an automated message from the Missing Timesheet Reporter tool.</p>
-        </body>
-        </html>
-        """
+            # Add task details in bullet points
+            for task in tasks:
+                # Get client success member
+                client_success = task.get('Client Success Member', 'Not specified')
+                
+                # Get task dates (could be multiple dates)
+                task_date = task.get('Date', date_str)
+                
+                body += f"""
+                <ul style="list-style-type: disc; padding-left: 20px;">
+                    <li><strong>Task:</strong> {task.get('Task', 'Unknown')}</li>
+                    <li><strong>Project:</strong> {task.get('Project', 'Unknown')}</li>
+                    <li><strong>Assignment Dates:</strong> {task_date}</li>
+                    <li><strong>Client Success Contact:</strong> {client_success}</li>
+                </ul>
+                """
+            
+            body += """
+            <p>We completely understand things can get busy — but consistent time logging helps us improve project planning and smooth reporting.</p>
+            
+            <p>If something's holding you back from logging your hours, just reach out. We're here to help.</p>
+            </body>
+            </html>
+            """
+            
+        else:
+            # 1 day overdue template
+            body = f"""
+            <html>
+            <body style="font-family: Arial, sans-serif; line-height: 1.5;">
+            <p>Hi {designer_name},</p>
+            
+            <p>This is a gentle reminder to log your hours for the task below — It takes a minute, but the impact is big:</p>
+            """
+            
+            # Add task details in bullet points (for each task)
+            for task in tasks:
+                # Get client success member
+                client_success = task.get('Client Success Member', 'Not specified')
+                
+                # Get task date and time
+                task_date = task.get('Date', date_str)
+                task_time = f"{task.get('Start Time', 'Unknown')} - {task.get('End Time', 'Unknown')}"
+                
+                body += f"""
+                <ul style="list-style-type: disc; padding-left: 20px;">
+                    <li><strong>Task:</strong> {task.get('Task', 'Unknown')}</li>
+                    <li><strong>Project:</strong> {task.get('Project', 'Unknown')}</li>
+                    <li><strong>Assigned on:</strong> {task_date} {task_time}</li>
+                    <li><strong>Client Success Contact:</strong> {client_success}</li>
+                </ul>
+                """
+            
+            body += """
+            <p>Taking a minute now helps us stay on top of things later 🙌</p>
+            <p>Let us know if you need any support with this.</p>
+            </body>
+            </html>
+            """
         
         # Attach email body
         msg.attach(MIMEText(body, 'html'))
@@ -1141,20 +1136,50 @@ def send_teams_webhook_notification(designer_name, webhook_url, tasks, report_da
             days_overdue = task.get('Days Overdue', 0)
             max_days_overdue = max(max_days_overdue, days_overdue)
         
-        # Create urgency indicator
-        urgency_indicator = ""
-        if max_days_overdue >= 2:
-            urgency_indicator = "🔴 URGENT 🔴 "
-        elif max_days_overdue == 1:
-            urgency_indicator = "🟠 REMINDER 🟠 "
-        
         # Create date string
         date_str = report_date.strftime('%Y-%m-%d')
         
-        # Simple text message format (most compatible)
-        message = {
-            "text": f"{urgency_indicator}**Missing Timesheet Alert - {date_str}**\n\nHello {designer_name},\n\nYou have {len(tasks)} task(s) without timesheet entries. Please log your time as soon as possible."
-        }
+        # Example task for message (just use the first one)
+        task = tasks[0] if tasks else {}
+        task_name = task.get('Task', 'Unknown')
+        project_name = task.get('Project', 'Unknown')
+        client_success = task.get('Client Success Member', 'Not specified')
+        task_date = task.get('Date', date_str)
+        
+        # Create message based on overdue status
+        if max_days_overdue >= 2:
+            message = {
+                "text": f"**Heads-Up: You've Missed Logging Hours for 2 Days**\n\n"
+                       f"Hi {designer_name},\n\n"
+                       f"It looks like no hours have been logged for the past two days for the following task:\n\n"
+                       f"* **Task:** {task_name}\n"
+                       f"* **Project:** {project_name}\n"
+                       f"* **Assignment Dates:** {task_date}\n"
+                       f"* **Client Success Contact:** {client_success}\n\n"
+                       f"We completely understand things can get busy — but consistent time logging helps us improve project planning and smooth reporting.\n\n"
+                       f"If something's holding you back from logging your hours, just reach out. We're here to help."
+            }
+        else:
+            # Format the time if available
+            time_str = ""
+            if 'Start Time' in task and 'End Time' in task:
+                time_str = f"{task.get('Start Time', '')} - {task.get('End Time', '')}"
+            
+            message = {
+                "text": f"**Quick Nudge – Log Your Hours**\n\n"
+                       f"Hi {designer_name},\n\n"
+                       f"This is a gentle reminder to log your hours for the task below — It takes a minute, but the impact is big:\n\n"
+                       f"* **Task:** {task_name}\n"
+                       f"* **Project:** {project_name}\n"
+                       f"* **Assigned on:** {task_date} {time_str}\n"
+                       f"* **Client Success Contact:** {client_success}\n\n"
+                       f"Taking a minute now helps us stay on top of things later 🙌\n\n"
+                       f"Let us know if you need any support with this."
+            }
+        
+        # If there are multiple tasks, add a note
+        if len(tasks) > 1:
+            message["text"] += f"\n\n**Note:** There are {len(tasks)} tasks in total requiring attention."
         
         # Send to Teams webhook
         response = requests.post(webhook_url, json=message)
