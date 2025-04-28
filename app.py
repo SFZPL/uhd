@@ -626,14 +626,14 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
         
         # Post-process to ensure only slots with the correct allocation type are included
         # This adds a second layer of filtering in case the Odoo query didn't filter properly
-        if shift_status_filter:
-            filtered_slots = []
-            for slot in planning_slots:
-                slot_status = slot.get('x_studio_shift_status', '').lower()
-                if slot_status == shift_status_filter.lower():
-                    filtered_slots.append(slot)
-            planning_slots = filtered_slots
-            logger.info(f"Post-filtered to {len(planning_slots)} slots with x_studio_shift_status={shift_status_filter}")
+        # if shift_status_filter:
+        #     filtered_slots = []
+        #     for slot in planning_slots:
+        #         slot_status = slot.get('x_studio_shift_status', '').lower()
+        #         if slot_status == shift_status_filter.lower():
+        #             filtered_slots.append(slot)
+        #     planning_slots = filtered_slots
+        #     logger.info(f"Post-filtered to {len(planning_slots)} slots with x_studio_shift_status={shift_status_filter}")
         
         # Step 2: Get all timesheet entries for the date range
         timesheet_entries = get_timesheet_entries(models, uid, odoo_db, odoo_password, reference_date, selected_date)
@@ -1216,13 +1216,17 @@ def main():
             help="Filter planning slots by their shift status"
         )
 
-        # Update the shift status filter value based on selection
+        # Map the human label → actual value stored in x_studio_shift_status
+        STATUS_MAP = {
+            "Planned (Confirmed)":     "Confirmed",     # <- change to "Confirmed" if DB is capitalised
+            "Forecasted (Unconfirmed)": "Unconfirmed"   # <- or "Unconfirmed"
+        }
+
         if shift_status_filter == "All":
             st.session_state.shift_status_filter = None
-        elif shift_status_filter == "Planned (Confirmed)":
-            st.session_state.shift_status_filter = "planned"
-        elif shift_status_filter == "Forecasted (Unconfirmed)":
-            st.session_state.shift_status_filter = "forecasted"
+        else:
+            st.session_state.shift_status_filter = STATUS_MAP[shift_status_filter]
+
         
         # Reference date setting for filtering historical tasks
         st.subheader("Reference Date")
