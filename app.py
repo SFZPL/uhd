@@ -1517,8 +1517,8 @@ def main():
             
             # Use found values or fallbacks
             STATUS_MAP = {
-                "Planned (Confirmed)": planned_value or "confirmed",
-                "Forecasted (Unconfirmed)": forecast_value or "unconfirmed"
+                "Planned (Confirmed)": "Planned",
+                "Forecasted (Unconfirmed)": "Forecasted"
             }
         else:
             # Fallback to default values if we haven't loaded the values yet
