@@ -1132,44 +1132,64 @@ def generate_missing_timesheet_report(selected_date, allocation_filter=None, sen
         st.session_state.last_error = error_details
         return pd.DataFrame(), 0, len(timesheet_entries) if 'timesheet_entries' in locals() else 0
 
-def send_teams_webhook_notification(designer_name, webhook_url, tasks, report_date):
-    """Send a simplified notification to a Teams channel via webhook"""
+def send_teams_webhook_notification(
+        designer_name: str,
+        webhook_url: str,
+        tasks: list,
+        report_date: date
+):
+    """
+    Post a short adaptive-card–compatible message to Teams.
+    """
     try:
-        # Find the most overdue task
-        max_days_overdue = 0
-        for task in tasks:
-            days_overdue = task.get('Days Overdue', 0)
-            max_days_overdue = max(max_days_overdue, days_overdue)
-        
-        # Create urgency indicator
-        urgency_indicator = ""
-        if max_days_overdue >= 2:
-            urgency_indicator = "🔴 URGENT 🔴 "
-        elif max_days_overdue == 1:
-            urgency_indicator = "🟠 REMINDER 🟠 "
-        
-        # Create date string
-        date_str = report_date.strftime('%Y-%m-%d')
-        
-        # Simple text message format (most compatible)
-        message = {
-            "text": f"{urgency_indicator}**Missing Timesheet Alert - {date_str}**\n\nHello {designer_name},\n\nYou have {len(tasks)} task(s) without timesheet entries. Please log your time as soon as possible."
-        }
-        
-        # Send to Teams webhook
-        response = requests.post(webhook_url, json=message)
-        
-        if response.status_code == 200:
-            logger.info(f"Teams webhook notification sent for {designer_name}")
+        max_days_overdue = max(t.get("Days Overdue", 0) for t in tasks)
+        one_day  = (max_days_overdue == 1)
+        two_plus = (max_days_overdue >= 2)
+
+        if one_day:
+            title = "Quick Nudge – Log Your Hours"
+            emoji = "🟠"
+            intro = ("This is a gentle reminder to log your hours for the "
+                     "task below — it only takes a minute:")
+        else:
+            title = "Heads-Up: You’ve Missed Logging Hours for 2 Days"
+            emoji = "🔴"
+            intro = ("It looks like no hours have been logged for the past "
+                     "two days for the task(s) below:")
+
+        # convert task list to bullet points
+        bullet_lines = []
+        for t in tasks:
+            bullet_lines.append(
+                f"- **{t.get('Task','?')}** "
+                f"(Project: {t.get('Project','?')}, "
+                f"Assigned on: {t.get('Date','?')}, "
+                f"CS: {t.get('Client Success Member','?')})"
+            )
+        bullets = "\n".join(bullet_lines)
+
+        card_text = (f"{emoji} **{title}**\n\n"
+                     f"{intro}\n\n{bullets}\n\n"
+                     "If something’s blocking you, let us know – we’re here "
+                     "to help!")
+
+        # basic card
+        payload = {"text": card_text}
+
+        resp = requests.post(webhook_url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            logger.info("Teams webhook sent for %s", designer_name)
             return True
         else:
-            logger.error(f"Failed to send Teams webhook: {response.status_code} - {response.text}")
+            logger.error("Teams webhook failed: %s %s",
+                         resp.status_code, resp.text)
             return False
-            
-    except Exception as e:
-        error_details = traceback.format_exc()
-        logger.error(f"Error sending Teams webhook for {designer_name}: {e}\n{error_details}")
+
+    except Exception as exc:
+        logger.error("send_teams_webhook_notification failed: %s",
+                     exc, exc_info=True)
         return False
+
 
 def main():
     st.title("Missing Timesheet Reporter (Planning-Focused)")
