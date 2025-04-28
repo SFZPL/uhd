@@ -891,14 +891,15 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
     """
     uid = st.session_state.odoo_uid
     models = st.session_state.odoo_models
+    odoo_db = st.session_state.odoo_db
+    odoo_password = st.session_state.odoo_password  # MOVED UP
+    reference_date = st.session_state.reference_date
+    
     if uid and models:
         st.session_state.shift_status_values = get_field_selection_values(
             models, uid, odoo_password, 'planning.slot', 'x_studio_shift_status'
         )
         logger.info(f"Shift status values: {st.session_state.shift_status_values}")
-    odoo_db = st.session_state.odoo_db
-    odoo_password = st.session_state.odoo_password
-    reference_date = st.session_state.reference_date
     
     if not uid or not models:
         st.error("Not connected to Odoo")
