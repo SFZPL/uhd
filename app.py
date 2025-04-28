@@ -485,130 +485,124 @@ def send_email_report(df, selected_date, missing_count, timesheet_count, allocat
         st.session_state.last_error = error_details
         return False
 
-def send_designer_email(designer_name, designer_email, report_date, tasks, smtp_settings):
-    """Send email to designer with missing timesheet entries"""
+def send_designer_email(
+        designer_name: str,
+        designer_email: str,
+        report_date: date,
+        tasks: list,
+        smtp_settings: dict
+):
+    """
+    Send a one-shot e-mail to a designer listing the tasks that still
+    have no hours logged.  Message style changes according to how long
+    the oldest task has been open.
+    """
     try:
-        # Check if we have all required SMTP settings
-        required_settings = ['server', 'port', 'username', 'password']
-        if not all(key in smtp_settings for key in required_settings):
-            logger.error("Missing required SMTP settings")
-            return False
-            
-        # Create email
-        msg = MIMEMultipart()
-        msg['From'] = smtp_settings['username']
-        msg['To'] = designer_email
-        
-        # Find the most overdue task to set email urgency
-        max_days_overdue = 0
-        for task in tasks:
-            if 'Days Overdue' in task:
-                max_days_overdue = max(max_days_overdue, task['Days Overdue'])
-            elif 'Date' in task:
-                task_date = datetime.strptime(task['Date'], "%Y-%m-%d").date()
-                days_overdue = (report_date - task_date).days
-                max_days_overdue = max(max_days_overdue, days_overdue)
-        
-        # Add urgency to subject line based on age of most overdue task
-        urgency_prefix = ""
-        if max_days_overdue >= 2:
-            urgency_prefix = "IMMEDIATE ACTION REQUIRED: "
-        elif max_days_overdue == 1:
-            urgency_prefix = "REMINDER: "
-            
-        msg['Subject'] = f"{urgency_prefix}Missing Timesheet Alert - {report_date.strftime('%Y-%m-%d')}"
-        
-        # Create urgency message based on most overdue task
-        urgency_message = ""
-        if max_days_overdue >= 2:
-            urgency_message = f"""
-            <p style="color: red; font-weight: bold; font-size: 16px; background-color: #ffeeee; padding: 10px; border: 2px solid red;">
-            URGENT ACTION REQUIRED: You have tasks that are {max_days_overdue} days overdue. 
-            Your managers will be notified about these missing timesheets immediately.
-            Please complete your timesheets as a top priority.
-            </p>
-            """
-        elif max_days_overdue == 1:
-            urgency_message = """
-            <p style="color: orange; font-weight: bold; padding: 8px; background-color: #fff8ee; border: 1px solid orange;">
-            REMINDER: These tasks are from yesterday and need immediate attention. Please log your 
-            time as soon as possible.
-            </p>
-            """
-        
-        # Create email body text
-        date_str = report_date.strftime('%Y-%m-%d')
-        
-        body = f"""
-        <html>
-        <body>
-        <h2>Missing Timesheet Alert - {date_str}</h2>
-        <p>Hello {designer_name},</p>
-        
-        <p>You have {len(tasks)} task(s) without timesheet entries for {date_str}. 
-        Please log your time as soon as possible.</p>
-        
-        {urgency_message}
-        
-        <h3>Tasks missing timesheet entries:</h3>
-        <table border="1" cellpadding="5">
-        <tr>
-            <th>Project</th>
-            <th>Task</th>
-            <th>Time</th>
-            <th>Allocated Hours</th>
-            <th>Days Overdue</th>
-        </tr>
-        """
-        
-        # Add tasks to the email with individual overdue status
-        for task in tasks:
-            # Calculate or extract days overdue for this specific task
-            days_overdue = task.get('Days Overdue', 0)
-            if days_overdue == 0 and 'Date' in task:
-                task_date = datetime.strptime(task['Date'], "%Y-%m-%d").date()
-                days_overdue = (report_date - task_date).days
-            
-            # Create a style based on days overdue
-            urgency_style = ""
-            if days_overdue >= 2:
-                urgency_style = 'style="background-color: #ffeeee; color: red; font-weight: bold;"'
-            elif days_overdue == 1:
-                urgency_style = 'style="background-color: #fff8ee; color: orange;"'
-                
-            body += f"""
+        # -- SMTP sanity check ------------------------------------------------
+        for key in ("server", "port", "username", "password"):
+            if key not in smtp_settings or not smtp_settings[key]:
+                logger.error("Missing SMTP setting: %s", key)
+                return False
+
+        # -- work out 'days overdue' -----------------------------------------
+        max_days_overdue = max(t.get("Days Overdue", 0) for t in tasks)
+
+        one_day  = (max_days_overdue == 1)
+        two_plus = (max_days_overdue >= 2)
+
+        if one_day:
+            subj = "Quick Nudge – Log Your Hours"
+        else:  # two_plus
+            subj = "Heads-Up: You’ve Missed Logging Hours for 2 Days"
+
+        # -- e-mail boilerplate ----------------------------------------------
+        msg            = MIMEMultipart()
+        msg["From"]    = smtp_settings["username"]
+        msg["To"]      = designer_email
+        msg["Subject"] = subj
+
+        # --------------------------------------------------------------------
+        # Build HTML body
+        # --------------------------------------------------------------------
+        def format_task(t):
+            return f"""
             <tr>
-                <td>{task.get('Project', 'Unknown')}</td>
-                <td>{task.get('Task', 'Unknown')}</td>
-                <td>{task.get('Start Time', 'Unknown')} - {task.get('End Time', 'Unknown')}</td>
-                <td>{task.get('Allocated Hours', 0)}</td>
-                <td {urgency_style}>{days_overdue} days</td>
-            </tr>
-            """
-            
-        body += """
+                <td>{t.get('Task', 'Unknown')}</td>
+                <td>{t.get('Project', 'Unknown')}</td>
+                <td>{t.get('Date', '—')}</td>
+                <td>{t.get('Client Success Member', 'Unknown')}</td>
+            </tr>"""
+
+        tasks_html = "".join(format_task(t) for t in tasks)
+
+        greeting = (
+            f"<p>Hi {designer_name},</p>"
+            if one_day
+            else f"<p>Hi {designer_name},</p>"
+        )
+
+        intro = ("""
+            This is a gentle reminder to log your hours for the task below — 
+            it takes a minute, but the impact is big:
+        """ if one_day else """
+            It looks like no hours have been logged for the past two days
+            for the following task:
+        """)
+
+        outro = ("""
+            <p>Taking a minute now helps us stay on top of things later 🙌</p>
+            <p>Let us know if you need any support with this.</p>
+        """ if one_day else """
+            <p>We completely understand things can get busy — but consistent
+            time logging helps us improve project planning and smooth
+            reporting.</p>
+            <p>If something’s holding you back from logging your hours,
+            just reach out. We’re here to help.</p>
+        """)
+
+        body = f"""
+        <html><body>
+        {greeting}
+        <p>{intro}</p>
+
+        <table border="1" cellpadding="6" cellspacing="0">
+            <thead>
+                <tr>
+                    <th>Task</th>
+                    <th>Project</th>
+                    <th>Assigned on / Dates</th>
+                    <th>Client-Success Contact</th>
+                </tr>
+            </thead>
+            <tbody>
+                {tasks_html}
+            </tbody>
         </table>
-        <p>This is an automated message from the Missing Timesheet Reporter tool.</p>
-        </body>
-        </html>
+
+        {outro}
+
+        <p style="font-size: 12px;">
+            — Automated notice from the Missing Timesheet Reporter
+        </p>
+        </body></html>
         """
-        
-        # Attach email body
-        msg.attach(MIMEText(body, 'html'))
-        
-        # Send email
-        server = smtplib.SMTP(smtp_settings['server'], smtp_settings['port'])
+
+        msg.attach(MIMEText(body, "html"))
+
+        # -- send it ----------------------------------------------------------
+        server = smtplib.SMTP(smtp_settings["server"], smtp_settings["port"])
         server.starttls()
-        server.login(smtp_settings['username'], smtp_settings['password'])
+        server.login(smtp_settings["username"], smtp_settings["password"])
         server.send_message(msg)
         server.quit()
-        
-        logger.info(f"Email alert sent to {designer_name} ({designer_email})")
+
+        logger.info("Designer e-mail sent to %s", designer_email)
         return True
-    except Exception as e:
-        error_details = traceback.format_exc()
-        logger.error(f"Error sending email to {designer_name}: {e}\n{error_details}")
+
+    except Exception as exc:
+        logger.error("send_designer_email failed: %s", exc, exc_info=True)
         return False
+
 
 def generate_missing_timesheet_report(selected_date, allocation_filter=None, send_email=False, send_designer_emails=False):
     """
