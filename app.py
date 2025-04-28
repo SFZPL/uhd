@@ -932,7 +932,7 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     'Start Time': str(start_time),
                     'End Time': str(end_time),
                     'Allocated Hours': float(allocated_hours),
-                    'Allocation Type': str(shift_status_filter),
+                    'Shift Status': str(shift_status_filter),
                     'Days Overdue': int(days_since_task),
                     'Urgency': 'High' if days_since_task >= 2 else ('Medium' if days_since_task == 1 else 'Low')
                 }
@@ -1108,7 +1108,7 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
             # Return empty DataFrame with columns
             empty_df = pd.DataFrame(columns=[
                 'Date', 'Designer', 'Project', 'Client Success Member', 'Task', 'Slot Name', 
-                'Start Time', 'End Time', 'Allocated Hours', 'Allocation Type', 'Days Overdue', 'Urgency'
+                'Start Time', 'End Time', 'Allocated Hours', 'Shift Status', 'Days Overdue', 'Urgency'
             ])
             
             # Send email for empty report if requested
