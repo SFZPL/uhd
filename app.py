@@ -1594,7 +1594,7 @@ def main():
                     st.warning(f"No timesheet entries found from {st.session_state.reference_date.strftime('%Y-%m-%d')} to {selected_date.strftime('%Y-%m-%d')}")
                     
                 if missing_count > 0:
-                    filters_text = ""
+                    filter_text = ""
                     if st.session_state.shift_status_filter:
                         filter_text = f" with shift status '{st.session_state.shift_status_filter}'"
                     
