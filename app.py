@@ -1218,8 +1218,8 @@ def main():
 
         # Map the human label → actual value stored in x_studio_shift_status
         STATUS_MAP = {
-            "Planned (Confirmed)":     "Confirmed",     # <- change to "Confirmed" if DB is capitalised
-            "Forecasted (Unconfirmed)": "Unconfirmed"   # <- or "Unconfirmed"
+            "Planned (Confirmed)":     "confirmed",     # <- change to "Confirmed" if DB is capitalised
+            "Forecasted (Unconfirmed)": "unconfirmed"   # <- or "Unconfirmed"
         }
 
         if shift_status_filter == "All":
@@ -1580,7 +1580,10 @@ def main():
         else:
             # Display shift status filter info
             if st.session_state.shift_status_filter:
-                shift_status_label = "Planned (Confirmed)" if st.session_state.shift_status_filter.lower() == "planned" else "Forecasted (Unconfirmed)"
+                shift_status_label = (
+                    "Planned (Confirmed)" if st.session_state.shift_status_filter == "confirmed"
+                    else "Forecasted (Unconfirmed)"
+                )
                 st.info(f"Filtering for {shift_status_label} planning slots")
             
             with st.spinner("Generating timesheet report..."):
@@ -1601,7 +1604,6 @@ def main():
                     filter_text = ""
                     if st.session_state.shift_status_filter:
                         filter_text = f" with shift status '{st.session_state.shift_status_filter}'"
-                    
                     st.warning(f"Found {missing_count} planning slots{filter_text} without timesheet entries from {st.session_state.reference_date.strftime('%Y-%m-%d')} to {selected_date.strftime('%Y-%m-%d')}")
                     
                     if not df.empty:
@@ -1680,7 +1682,6 @@ def main():
                     filter_text = ""
                     if st.session_state.shift_status_filter:
                         filter_text = f" (shift status: '{st.session_state.shift_status_filter}')"
-                        
                     st.success(f"All planning slots{filter_text} have corresponding timesheet entries!")
                     
                     if not df.empty and st.session_state.debug_mode:
