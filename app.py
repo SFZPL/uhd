@@ -1216,7 +1216,7 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     'Start Time': str(start_time),
                     'End Time': str(end_time),
                     'Allocated Hours': float(allocated_hours),
-                    'Shift Status': str(shift_status_filter),
+                    'Shift Status': str(slot.get('x_studio_shift_status', 'Unknown')),
                     'Days Overdue': int(days_since_task),
                     'Urgency': 'High' if days_since_task >= 2 else ('Medium' if days_since_task == 1 else 'Low')
                 }
