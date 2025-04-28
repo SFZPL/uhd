@@ -46,7 +46,9 @@ if 'debug_mode' not in st.session_state:
 if 'confirmed_only' not in st.session_state:
     st.session_state.confirmed_only = True  # Default to showing only confirmed tasks
 if 'shift_status_filter' not in st.session_state:
-    st.session_state.shift_status_filter = "planned"  # Default to Planned (confirmed)
+    st.session_state.shift_status_filter = "confirmed"  # Default to Planned (confirmed)
+if 'shift_status_values' not in st.session_state:
+    st.session_state.shift_status_values = {}
 if 'model_fields_cache' not in st.session_state:
     st.session_state.model_fields_cache = {}
 if 'last_error' not in st.session_state:
@@ -116,6 +118,13 @@ def authenticate_odoo(url, db, username, password):
             
         models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object")
         logger.info(f"Successfully connected to Odoo (UID: {uid})")
+        # Get shift status values if connected successfully
+        if uid and models:
+            shift_values = get_field_selection_values(
+                models, uid, odoo_db, password, 'planning.slot', 'x_studio_shift_status'
+            )
+            st.session_state.shift_status_values = shift_values
+            logger.info(f"Shift status values: {shift_values}")
         return uid, models
     except Exception as e:
         error_details = traceback.format_exc()
@@ -123,7 +132,25 @@ def authenticate_odoo(url, db, username, password):
         st.error(f"Odoo connection error: {e}")
         st.session_state.last_error = error_details
         return None, None
-
+    
+def get_field_selection_values(models, uid, odoo_db, odoo_password, model_name, field_name):
+    """Get all possible selection values for a field"""
+    try:
+        # Get field definition
+        fields_info = get_model_fields(models, uid, odoo_db, odoo_password, model_name)
+        
+        # Check if the field exists and is a selection type
+        if field_name in fields_info and fields_info[field_name]['type'] == 'selection':
+            # Return the selection options
+            return dict(fields_info[field_name]['selection'])
+        else:
+            logger.warning(f"Field {field_name} is not a selection type or doesn't exist")
+            return {}
+    except Exception as e:
+        error_details = traceback.format_exc()
+        logger.error(f"Error getting selection values: {e}\n{error_details}")
+        return {}
+    
 def get_model_fields(models, uid, odoo_db, odoo_password, model_name):
     """Get fields for a specific model, with caching"""
     # Check if we have cached fields for this model
@@ -186,14 +213,42 @@ def get_planning_slots(models, uid, odoo_db, odoo_password, start_date, end_date
         ]
         
         # Add shift status filter if provided
+        # Add shift status filter if provided
         domains = []
         if shift_status_filter and 'x_studio_shift_status' in available_fields:
             logger.info(f"Filtering planning slots by x_studio_shift_status: {shift_status_filter}")
+            
+            # Generate multiple possible formats of the status value
+            possible_values = [
+                shift_status_filter,                      # Original value
+                shift_status_filter.lower(),              # Lowercase
+                shift_status_filter.upper(),              # Uppercase
+                shift_status_filter.capitalize(),         # First letter capitalized
+                shift_status_filter.title(),              # Title Case
+            ]
+            
+            # Also try typical values if shift_status_filter contains certain keywords
+            if "confirm" in shift_status_filter.lower():
+                possible_values.extend(["Confirmed", "confirmed", "CONFIRMED"])
+            if "plan" in shift_status_filter.lower():
+                possible_values.extend(["Planned", "planned", "PLANNED"])
+            if "forecast" in shift_status_filter.lower() or "unconfirm" in shift_status_filter.lower():
+                possible_values.extend(["Forecasted", "forecasted", "FORECASTED", 
+                                    "Unconfirmed", "unconfirmed", "UNCONFIRMED"])
+            
+            # Deduplicate
+            possible_values = list(set(possible_values))
+            
+            # Log what we're trying
+            logger.info(f"Trying these possible values for x_studio_shift_status: {possible_values}")
+            
+            # Create domains for each possible value
             for base_domain in base_domains:
                 if base_domain:  # Skip empty domain
-                    domain_with_filter = base_domain.copy()
-                    domain_with_filter.append(('x_studio_shift_status', '=', shift_status_filter))
-                    domains.append(domain_with_filter)
+                    for value in possible_values:
+                        domain_with_filter = base_domain.copy()
+                        domain_with_filter.append(('x_studio_shift_status', '=', value))
+                        domains.append(domain_with_filter)
         else:
             domains = base_domains
         
@@ -612,6 +667,11 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
     """
     uid = st.session_state.odoo_uid
     models = st.session_state.odoo_models
+    if uid and models:
+        st.session_state.shift_status_values = get_field_selection_values(
+            models, uid, odoo_password, 'planning.slot', 'x_studio_shift_status'
+        )
+        logger.info(f"Shift status values: {st.session_state.shift_status_values}")
     odoo_db = st.session_state.odoo_db
     odoo_password = st.session_state.odoo_password
     reference_date = st.session_state.reference_date
@@ -625,15 +685,27 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
         planning_slots = get_planning_slots(models, uid, odoo_db, odoo_password, reference_date, selected_date, shift_status_filter)
         
         # Post-process to ensure only slots with the correct allocation type are included
-        # This adds a second layer of filtering in case the Odoo query didn't filter properly
-        # if shift_status_filter:
-        #     filtered_slots = []
-        #     for slot in planning_slots:
-        #         slot_status = slot.get('x_studio_shift_status', '').lower()
-        #         if slot_status == shift_status_filter.lower():
-        #             filtered_slots.append(slot)
-        #     planning_slots = filtered_slots
-        #     logger.info(f"Post-filtered to {len(planning_slots)} slots with x_studio_shift_status={shift_status_filter}")
+        # Post-process to ensure only slots with the correct status are included
+        if shift_status_filter:
+            filtered_slots = []
+            for slot in planning_slots:
+                slot_status = str(slot.get('x_studio_shift_status', '')).lower()
+                shift_lower = shift_status_filter.lower()
+                
+                # Check for various matches
+                is_match = False
+                if slot_status == shift_lower:
+                    is_match = True
+                elif "confirm" in shift_lower and ("confirm" in slot_status or "plan" in slot_status):
+                    is_match = True
+                elif "unconfirm" in shift_lower and ("unconfirm" in slot_status or "forecast" in slot_status):
+                    is_match = True
+                
+                if is_match:
+                    filtered_slots.append(slot)
+                    
+            planning_slots = filtered_slots
+            logger.info(f"Post-filtered to {len(planning_slots)} slots with status matching '{shift_status_filter}'")
         
         # Step 2: Get all timesheet entries for the date range
         timesheet_entries = get_timesheet_entries(models, uid, odoo_db, odoo_password, reference_date, selected_date)
@@ -1217,11 +1289,35 @@ def main():
         )
 
         # Map the human label → actual value stored in x_studio_shift_status
-        STATUS_MAP = {
-            "Planned (Confirmed)":     "confirmed",     # <- change to "Confirmed" if DB is capitalised
-            "Forecasted (Unconfirmed)": "unconfirmed"   # <- or "Unconfirmed"
-        }
+        # Map the human label → actual value stored in x_studio_shift_status
+        if st.session_state.shift_status_values:
+            # If we have values from the database, try to match them
+            possible_values = {value.lower(): key for key, value in st.session_state.shift_status_values.items()}
+            
+            # Try to find matching values based on keywords
+            planned_value = None
+            forecast_value = None
+            
+            for db_value, db_key in possible_values.items():
+                if "confirm" in db_value or "plan" in db_value:
+                    planned_value = db_key
+                if "unconfirm" in db_value or "forecast" in db_value:
+                    forecast_value = db_key
+            
+            # Use found values or fallbacks
+            STATUS_MAP = {
+                "Planned (Confirmed)": planned_value or "confirmed",
+                "Forecasted (Unconfirmed)": forecast_value or "unconfirmed"
+            }
+        else:
+            # Fallback to default values if we haven't loaded the values yet
+            STATUS_MAP = {
+                "Planned (Confirmed)": "confirmed",
+                "Forecasted (Unconfirmed)": "unconfirmed"
+            }
 
+        # Log what values we're using
+        logger.info(f"Using status map: {STATUS_MAP}")
         if shift_status_filter == "All":
             st.session_state.shift_status_filter = None
         else:
@@ -1520,6 +1616,14 @@ def main():
                         st.session_state.odoo_username = odoo_username
                         st.session_state.odoo_password = odoo_password
                         st.success("Connected successfully!")
+                        
+                        # Add this code here
+                        shift_values = get_field_selection_values(
+                            models, uid, odoo_db, odoo_password, 
+                            'planning.slot', 'x_studio_shift_status'
+                        )
+                        st.session_state.shift_status_values = shift_values
+                        logger.info(f"Shift status values: {shift_values}")
                     else:
                         st.error("Failed to connect to Odoo")
     
@@ -1527,6 +1631,26 @@ def main():
     # Connection status
     if st.session_state.odoo_uid and st.session_state.odoo_models:
         st.success(f"Connected to Odoo as {st.session_state.odoo_username}")
+        
+        # Add the debug button right here, after the connection success message
+        if st.session_state.debug_mode:
+            if st.button("Show Shift Status Values"):
+                if st.session_state.shift_status_values:
+                    st.write("Available shift status values:", st.session_state.shift_status_values)
+                    # Also show what would be mapped for UI labels
+                    st.write("UI mapping:")
+                    for label, value in {
+                        "Planned (Confirmed)": "confirmed",
+                        "Forecasted (Unconfirmed)": "unconfirmed"
+                    }.items():
+                        matching_db_value = None
+                        for db_key, db_val in st.session_state.shift_status_values.items():
+                            if value.lower() in db_val.lower() or db_val.lower() in value.lower():
+                                matching_db_value = f"{db_key} ({db_val})"
+                                break
+                        st.write(f"  {label} → {matching_db_value or 'No match found'}")
+                else:
+                    st.write("No shift status values loaded yet")
     else:
         st.warning("Not connected to Odoo. Please connect using the sidebar.")
         if st.button("Connect to Odoo"):
@@ -1542,6 +1666,14 @@ def main():
                     st.session_state.odoo_uid = uid
                     st.session_state.odoo_models = models
                     st.success("Connected successfully!")
+                    
+                    # Add this code here
+                    shift_values = get_field_selection_values(
+                        models, uid, st.session_state.odoo_db, st.session_state.odoo_password, 
+                        'planning.slot', 'x_studio_shift_status'
+                    )
+                    st.session_state.shift_status_values = shift_values
+                    logger.info(f"Shift status values: {shift_values}")
                 else:
                     st.error("Failed to connect to Odoo")
     
