@@ -1172,17 +1172,17 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                         has_timesheet = date_specific_hours > 0
             
             # Last resort: check if designer has ANY timesheet for THIS SPECIFIC DAY
-            if not has_timesheet and resource_name != "Unknown" and resource_name in designer_name_only_to_timesheet:
-                # Filter entries to only include those for the specific task date
-                matching_entries = [
-                    entry for entry in designer_name_only_to_timesheet[resource_name]['entries']
-                    if entry.get('date') == task_date_str
-                ]
+            # if not has_timesheet and resource_name != "Unknown" and resource_name in designer_name_only_to_timesheet:
+            #     # Filter entries to only include those for the specific task date
+            #     matching_entries = [
+            #         entry for entry in designer_name_only_to_timesheet[resource_name]['entries']
+            #         if entry.get('date') == task_date_str
+            #     ]
                 
-                if matching_entries:
-                    # Calculate hours for just the matching date
-                    date_specific_hours = sum(entry.get('unit_amount', 0) for entry in matching_entries)
-                    has_timesheet = date_specific_hours > 0
+            #     if matching_entries:
+            #         # Calculate hours for just the matching date
+            #         date_specific_hours = sum(entry.get('unit_amount', 0) for entry in matching_entries)
+            #         has_timesheet = date_specific_hours > 0
             
             # Get other slot info for display
             slot_name = slot.get('name', 'Unnamed Slot')
