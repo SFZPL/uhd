@@ -246,9 +246,8 @@ def get_planning_slots(models, uid, odoo_db, odoo_password, start_date, end_date
             for base_domain in base_domains:
                 if base_domain:  # Skip empty domain
                     for value in possible_values:
-                        domain_with_filter = base_domain.copy()
-                        domain_with_filter.append(('x_studio_shift_status', '=', value))
-                        domains.append(domain_with_filter)
+                        domains.append(base_domain + [('x_studio_shift_status', '=', value)])
+
         else:
             domains = base_domains
         
@@ -1154,7 +1153,7 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                 if matching_entries:
                     # Calculate hours for just the matching date
                     date_specific_hours = sum(entry.get('unit_amount', 0) for entry in matching_entries)
-                    has_timesheet = (date_specific_hours > 0) and (resource_user_id in user_ids if resource_user_id else False)
+                    has_timesheet = date_specific_hours > 0 
             
             # Second check: try matching by name + task_id + project_id
             if not has_timesheet and resource_name != "Unknown":
@@ -1271,45 +1270,7 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
             df = pd.DataFrame(report_data)
             
             # Count missing entries based on what's in report_data when not in debug mode
-            missing_count = len(report_data) if not st.session_state.debug_mode else len([slot for slot in planning_slots if not (
-                # First check: exact match by resource_id + task_id + project_id
-                (slot.get('resource_id') and slot.get('task_id') and slot.get('project_id') and 
-                (slot['resource_id'][0], slot['task_id'][0], slot['project_id'][0]) in resource_task_to_timesheet and
-                # Filter by date
-                any(entry.get('date') == datetime.strptime(slot.get('start_datetime', ''), "%Y-%m-%d %H:%M:%S").date().strftime("%Y-%m-%d") 
-                    for entry in resource_task_to_timesheet[(slot['resource_id'][0], slot['task_id'][0], slot['project_id'][0])]['entries']
-                    if slot.get('start_datetime') and entry.get('date')) and
-                # Check hours
-                sum(entry.get('unit_amount', 0) 
-                    for entry in resource_task_to_timesheet[(slot['resource_id'][0], slot['task_id'][0], slot['project_id'][0])]['entries']
-                    if slot.get('start_datetime') and entry.get('date') == datetime.strptime(slot.get('start_datetime', ''), "%Y-%m-%d %H:%M:%S").date().strftime("%Y-%m-%d")) > 0) or
-                
-                # Second check: try matching by name + task_id + project_id
-                (slot.get('resource_id') and slot.get('task_id') and slot.get('project_id') and
-                len(slot['resource_id']) > 1 and
-                (slot['resource_id'][1], slot['task_id'][0], slot['project_id'][0]) in designer_name_to_timesheet and
-                # Filter by date
-                any(entry.get('date') == datetime.strptime(slot.get('start_datetime', ''), "%Y-%m-%d %H:%M:%S").date().strftime("%Y-%m-%d") 
-                    for entry in designer_name_to_timesheet[(slot['resource_id'][1], slot['task_id'][0], slot['project_id'][0])]['entries']
-                    if slot.get('start_datetime') and entry.get('date')) and
-                # Check hours
-                sum(entry.get('unit_amount', 0) 
-                    for entry in designer_name_to_timesheet[(slot['resource_id'][1], slot['task_id'][0], slot['project_id'][0])]['entries']
-                    if slot.get('start_datetime') and entry.get('date') == datetime.strptime(slot.get('start_datetime', ''), "%Y-%m-%d %H:%M:%S").date().strftime("%Y-%m-%d")) > 0) or
-                
-                # Last resort: check if designer has ANY timesheet for THE SPECIFIC DAY
-                (slot.get('resource_id') and slot.get('start_datetime') and 
-                 len(slot['resource_id']) > 1 and
-                 slot['resource_id'][1] in designer_name_only_to_timesheet and
-                 # Check if any timesheet entries match the specific day
-                 any(entry.get('date') == datetime.strptime(slot['start_datetime'], "%Y-%m-%d %H:%M:%S").date().strftime("%Y-%m-%d")
-                     for entry in designer_name_only_to_timesheet[slot['resource_id'][1]]['entries']
-                     if entry.get('date')) and
-                 # Verify hours are logged for that date
-                 sum(entry.get('unit_amount', 0)
-                     for entry in designer_name_only_to_timesheet[slot['resource_id'][1]]['entries']
-                     if entry.get('date') == datetime.strptime(slot['start_datetime'], "%Y-%m-%d %H:%M:%S").date().strftime("%Y-%m-%d")) > 0)
-            )])
+            missing_count = len(report_data)
             
             # Send email report if requested
             if send_email and (missing_count > 0 or st.session_state.debug_mode):
@@ -1551,14 +1512,10 @@ def main():
         )
 
         # Map the human label → actual value stored in x_studio_shift_status
-        # Map the human label → actual value stored in x_studio_shift_status
         if st.session_state.shift_status_values:
             # If we have values from the database, try to match them
             possible_values = {value.lower(): key for key, value in st.session_state.shift_status_values.items()}
             
-            # Try to find matching values based on keywords
-            planned_value = None
-            forecast_value = None
             
             for db_value, db_key in possible_values.items():
                 if "confirm" in db_value or "plan" in db_value:
@@ -1568,8 +1525,8 @@ def main():
             
             # Use found values or fallbacks
             STATUS_MAP = {
-                "Planned (Confirmed)": "Planned",
-                "Forecasted (Unconfirmed)": "Forecasted"
+                "Planned (Confirmed)": planned_value or "Planned",
+                "Forecasted (Unconfirmed)": forecast_value or "Forecasted"
             }
         else:
             # Fallback to default values if we haven't loaded the values yet
