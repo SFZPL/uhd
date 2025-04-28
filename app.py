@@ -43,8 +43,6 @@ if 'odoo_password' not in st.session_state:
     st.session_state.odoo_password = odoo_password
 if 'debug_mode' not in st.session_state:
     st.session_state.debug_mode = False
-if 'confirmed_only' not in st.session_state:
-    st.session_state.confirmed_only = True  # Default to showing only confirmed tasks
 if 'shift_status_filter' not in st.session_state:
     st.session_state.shift_status_filter = "confirmed"  # Default to Planned (confirmed)
 if 'shift_status_values' not in st.session_state:
@@ -1515,8 +1513,8 @@ def main():
         if st.session_state.shift_status_values:
             # If we have values from the database, try to match them
             possible_values = {value.lower(): key for key, value in st.session_state.shift_status_values.items()}
-            
-            
+            planned_value = None
+            forecast_value = None
             for db_value, db_key in possible_values.items():
                 if "confirm" in db_value or "plan" in db_value:
                     planned_value = db_key
