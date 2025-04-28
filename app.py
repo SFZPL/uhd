@@ -43,10 +43,10 @@ if 'odoo_password' not in st.session_state:
     st.session_state.odoo_password = odoo_password
 if 'debug_mode' not in st.session_state:
     st.session_state.debug_mode = False
-if 'shift_status_filter' not in st.session_state:
-    st.session_state.shift_status_filter = "confirmed"  # Default to Planned (confirmed)
-if 'shift_status_values' not in st.session_state:
-    st.session_state.shift_status_values = {}
+if 'confirmed_only' not in st.session_state:
+    st.session_state.confirmed_only = True  # Default to showing only confirmed tasks
+if 'allocation_filter' not in st.session_state:
+    st.session_state.allocation_filter = "planning"  # Default to Planning (confirmed)
 if 'model_fields_cache' not in st.session_state:
     st.session_state.model_fields_cache = {}
 if 'last_error' not in st.session_state:
@@ -116,13 +116,6 @@ def authenticate_odoo(url, db, username, password):
             
         models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object")
         logger.info(f"Successfully connected to Odoo (UID: {uid})")
-        # Get shift status values if connected successfully
-        if uid and models:
-            shift_values = get_field_selection_values(
-                models, uid, odoo_db, password, 'planning.slot', 'x_studio_shift_status'
-            )
-            st.session_state.shift_status_values = shift_values
-            logger.info(f"Shift status values: {shift_values}")
         return uid, models
     except Exception as e:
         error_details = traceback.format_exc()
@@ -130,25 +123,7 @@ def authenticate_odoo(url, db, username, password):
         st.error(f"Odoo connection error: {e}")
         st.session_state.last_error = error_details
         return None, None
-    
-def get_field_selection_values(models, uid, odoo_db, odoo_password, model_name, field_name):
-    """Get all possible selection values for a field"""
-    try:
-        # Get field definition
-        fields_info = get_model_fields(models, uid, odoo_db, odoo_password, model_name)
-        
-        # Check if the field exists and is a selection type
-        if field_name in fields_info and fields_info[field_name]['type'] == 'selection':
-            # Return the selection options
-            return dict(fields_info[field_name]['selection'])
-        else:
-            logger.warning(f"Field {field_name} is not a selection type or doesn't exist")
-            return {}
-    except Exception as e:
-        error_details = traceback.format_exc()
-        logger.error(f"Error getting selection values: {e}\n{error_details}")
-        return {}
-    
+
 def get_model_fields(models, uid, odoo_db, odoo_password, model_name):
     """Get fields for a specific model, with caching"""
     # Check if we have cached fields for this model
@@ -171,11 +146,10 @@ def get_model_fields(models, uid, odoo_db, odoo_password, model_name):
         st.session_state.last_error = error_details
         return {}
 
-# Update to get_planning_slots function
-def get_planning_slots(models, uid, odoo_db, odoo_password, start_date, end_date=None, shift_status_filter=None):
+def get_planning_slots(models, uid, odoo_db, odoo_password, start_date, end_date=None, allocation_filter=None):
     """
     Get planning slots for a date range, with a focus on finding all slots 
-    that overlap with the given date range. Optionally filter by x_studio_shift_status.
+    that overlap with the given date range. Optionally filter by allocation_type.
     """
     try:
         # Get the fields for planning.slot model
@@ -210,49 +184,22 @@ def get_planning_slots(models, uid, odoo_db, odoo_password, start_date, end_date
             [('start_datetime', '>=', start_date_str), ('start_datetime', '<', next_date_str)]
         ]
         
-        # Add shift status filter if provided
-        # Add shift status filter if provided
+        # Add allocation_type filter if provided
         domains = []
-        if shift_status_filter and 'x_studio_shift_status' in available_fields:
-            logger.info(f"Filtering planning slots by x_studio_shift_status: {shift_status_filter}")
-            
-            # Generate multiple possible formats of the status value
-            possible_values = [
-                shift_status_filter,                      # Original value
-                shift_status_filter.lower(),              # Lowercase
-                shift_status_filter.upper(),              # Uppercase
-                shift_status_filter.capitalize(),         # First letter capitalized
-                shift_status_filter.title(),              # Title Case
-            ]
-            
-            # Also try typical values if shift_status_filter contains certain keywords
-            if "confirm" in shift_status_filter.lower():
-                possible_values.extend(["Confirmed", "confirmed", "CONFIRMED"])
-            if "plan" in shift_status_filter.lower():
-                possible_values.extend(["Planned", "planned", "PLANNED"])
-            if "forecast" in shift_status_filter.lower() or "unconfirm" in shift_status_filter.lower():
-                possible_values.extend(["Forecasted", "forecasted", "FORECASTED", 
-                                    "Unconfirmed", "unconfirmed", "UNCONFIRMED"])
-            
-            # Deduplicate
-            possible_values = list(set(possible_values))
-            
-            # Log what we're trying
-            logger.info(f"Trying these possible values for x_studio_shift_status: {possible_values}")
-            
-            # Create domains for each possible value
+        if allocation_filter and 'allocation_type' in available_fields:
+            logger.info(f"Filtering planning slots by allocation_type: {allocation_filter}")
             for base_domain in base_domains:
                 if base_domain:  # Skip empty domain
-                    for value in possible_values:
-                        domains.append(base_domain + [('x_studio_shift_status', '=', value)])
-
+                    domain_with_filter = base_domain.copy()
+                    domain_with_filter.append(('allocation_type', '=', allocation_filter))
+                    domains.append(domain_with_filter)
         else:
             domains = base_domains
         
         # Basic fields we want, checking which ones exist
         desired_fields = [
             'id', 'name', 'resource_id', 'start_datetime', 'end_datetime', 
-            'allocated_hours', 'state', 'project_id', 'task_id', 'x_studio_shift_status',
+            'allocated_hours', 'state', 'project_id', 'task_id', 'allocation_type',
             'create_uid', 'x_studio_sub_task_1', 'x_studio_task_activity', 'x_studio_service_category_1'
         ]
         
@@ -296,9 +243,9 @@ def get_planning_slots(models, uid, odoo_db, odoo_password, start_date, end_date
                 one_month_ago = (start_date - timedelta(days=30)).strftime("%Y-%m-%d")
                 base_domain = [('start_datetime', '>=', one_month_ago)]
                         
-                # Add shift status filter if provided
-                if shift_status_filter and 'x_studio_shift_status' in available_fields:
-                    base_domain.append(('x_studio_shift_status', '=', shift_status_filter))
+                # Add allocation_type filter if provided
+                if allocation_filter and 'allocation_type' in available_fields:
+                    base_domain.append(('allocation_type', '=', allocation_filter))
                 
                 recent_slots = models.execute_kw(
                     odoo_db, uid, odoo_password,
@@ -338,230 +285,6 @@ def get_planning_slots(models, uid, odoo_db, odoo_password, start_date, end_date
         st.error(f"Error fetching planning slots: {e}")
         st.session_state.last_error = error_details
         return []
-def debug_shift_status_values(models, uid, odoo_db, odoo_password):
-    """Extract and display all possible values for x_studio_shift_status field with detailed logging"""
-    try:
-        st.subheader("Debugging Shift Status Values")
-        
-        # Get the field information
-        fields_info = get_model_fields(models, uid, odoo_db, odoo_password, 'planning.slot')
-        
-        # Check if the field exists
-        if 'x_studio_shift_status' not in fields_info:
-            st.error("The field 'x_studio_shift_status' doesn't exist in the planning.slot model")
-            logger.error("The field 'x_studio_shift_status' doesn't exist in the planning.slot model")
-            return
-        
-        # Get field type and information
-        field_info = fields_info['x_studio_shift_status']
-        st.write(f"Field type: {field_info.get('type')}")
-        
-        # Show all field information for debugging
-        st.json(field_info)
-        
-        # If it's a selection field, show all possible values
-        if field_info.get('type') == 'selection':
-            selection_values = field_info.get('selection', [])
-            st.write("Possible values:")
-            for value in selection_values:
-                st.write(f"- Key: '{value[0]}', Label: '{value[1]}'")
-            
-            # Save to session state for reference
-            st.session_state.shift_status_values = dict(selection_values)
-        
-        # Query actual values in the database
-        st.subheader("Values currently in use")
-        
-        try:
-            # Query distinct values in the database
-            distinct_values = models.execute_kw(
-                odoo_db, uid, odoo_password,
-                'planning.slot', 'search_read',
-                [[]],
-                {'fields': ['x_studio_shift_status'], 'limit': 1000}
-            )
-            
-            # Count occurrences of each value
-            value_counts = {}
-            for record in distinct_values:
-                status = record.get('x_studio_shift_status', 'None')
-                value_counts[status] = value_counts.get(status, 0) + 1
-            
-            # Display counts
-            for status, count in sorted(value_counts.items(), key=lambda x: x[1], reverse=True):
-                st.write(f"- '{status}': {count} records")
-            
-            # Also check for any raw database values
-            st.subheader("Advanced: Raw Database Query")
-            st.write("This section attempts a lower-level query to get all possible values")
-            
-            try:
-                # Try a direct SQL query if the ORM approach isn't showing all values
-                # Note: This may not work depending on Odoo's XML-RPC permissions
-                query = """
-                SELECT DISTINCT x_studio_shift_status, COUNT(*) as count
-                FROM planning_slot
-                GROUP BY x_studio_shift_status
-                ORDER BY count DESC
-                """
-                
-                sql_result = models.execute_kw(
-                    odoo_db, uid, odoo_password,
-                    'planning.slot', 'query', [query]
-                )
-                
-                st.write("SQL Query Result:")
-                st.json(sql_result)
-            except Exception as e:
-                st.warning(f"Direct SQL query not supported: {e}")
-                
-        except Exception as e:
-            st.error(f"Error querying distinct values: {e}")
-            logger.error(f"Error querying distinct values: {e}")
-    
-    except Exception as e:
-        error_details = traceback.format_exc()
-        logger.error(f"Error debugging shift status values: {e}\n{error_details}")
-        st.error(f"Error debugging shift status values: {e}")
-        st.session_state.last_error = error_details
-
-
-def enhanced_shift_status_filtering(planning_slots, shift_status_filter, shift_status_values=None):
-    """
-    Enhanced filtering logic for planning slots based on shift status.
-    This handles different possible representations and values for shift status.
-    
-    Args:
-        planning_slots: List of planning slot dictionaries
-        shift_status_filter: The status to filter by (e.g., "confirmed", "forecasted")
-        shift_status_values: Dictionary mapping database values to display values (optional)
-        
-    Returns:
-        List of filtered planning slots
-    """
-    if not shift_status_filter or not planning_slots:
-        return planning_slots
-    
-    logger.info(f"Filtering {len(planning_slots)} slots with enhanced filter: '{shift_status_filter}'")
-    
-    # Convert shift_status_filter to lowercase for case-insensitive matching
-    shift_lower = shift_status_filter.lower()
-    
-    # Track what values we've seen for debugging
-    all_status_values = set()
-    matched_values = set()
-    
-    # If we have shift_status_values from the database, use them for reverse lookup
-    db_keys = []
-    if shift_status_values:
-        # Find all database keys that might correspond to our filter
-        for db_key, label in shift_status_values.items():
-            all_status_values.add(f"{db_key}:{label}")
-            label_lower = label.lower()
-            if shift_lower in label_lower or label_lower in shift_lower:
-                db_keys.append(db_key)
-                logger.info(f"Found matching database key: '{db_key}' for label '{label}'")
-    
-    # Filter the slots
-    filtered_slots = []
-    for slot in planning_slots:
-        # Get the status value - could be a string or other format
-        raw_status = slot.get('x_studio_shift_status')
-        
-        # Track all values we see
-        all_status_values.add(str(raw_status))
-        
-        # Convert to string if it's not
-        slot_status = str(raw_status).lower() if raw_status is not None else ""
-        
-        # Skip empty status if filtering is active
-        if not slot_status and shift_status_filter:
-            continue
-        
-        # Check various matching conditions
-        is_match = False
-        
-        # Direct match by database key
-        if db_keys and raw_status in db_keys:
-            is_match = True
-            matched_values.add(f"db_key:{raw_status}")
-        
-        # String matching heuristics for common keywords
-        elif "confirm" in shift_lower and ("confirm" in slot_status or "plan" in slot_status):
-            is_match = True
-            matched_values.add(f"keyword_confirm:{slot_status}")
-        elif "plan" in shift_lower and "plan" in slot_status:
-            is_match = True
-            matched_values.add(f"keyword_plan:{slot_status}")
-        elif any(term in shift_lower for term in ["unconfirm", "forecast"]) and \
-             any(term in slot_status for term in ["unconfirm", "forecast"]):
-            is_match = True
-            matched_values.add(f"keyword_forecast:{slot_status}")
-        elif shift_lower == slot_status:
-            is_match = True
-            matched_values.add(f"exact:{slot_status}")
-        
-        if is_match:
-            filtered_slots.append(slot)
-    
-    logger.info(f"Enhanced filtering: started with {len(planning_slots)} slots, returned {len(filtered_slots)}")
-    logger.info(f"All status values seen: {sorted(all_status_values)}")
-    logger.info(f"Matched values: {sorted(matched_values)}")
-    
-    return filtered_slots
-
-def query_distinct_field_values(models, uid, odoo_db, odoo_password, model_name, field_name, limit=1000):
-    """
-    Query all distinct values for a specific field in the database.
-    This is more reliable than relying on selection field definitions which might be out of sync.
-    
-    Args:
-        models: Odoo models object
-        uid: User ID
-        odoo_db: Database name
-        odoo_password: Password
-        model_name: Model to query (e.g., 'planning.slot')
-        field_name: Field to get distinct values for (e.g., 'x_studio_shift_status')
-        limit: Maximum number of records to retrieve
-        
-    Returns:
-        Dictionary mapping values to their counts in the database
-    """
-    try:
-        # Search for all records with this field
-        records = models.execute_kw(
-            odoo_db, uid, odoo_password,
-            model_name, 'search_read',
-            [[]], 
-            {'fields': [field_name], 'limit': limit}
-        )
-        
-        # Count the occurrences of each value
-        value_counts = {}
-        for record in records:
-            value = record.get(field_name, None)
-            value_str = str(value) if value is not None else 'None'
-            value_counts[value_str] = value_counts.get(value_str, 0) + 1
-        
-        # Also store the original values (not just strings)
-        original_values = {}
-        for record in records:
-            value = record.get(field_name, None)
-            value_str = str(value) if value is not None else 'None'
-            original_values[value_str] = value
-        
-        logger.info(f"Found {len(value_counts)} distinct values for {field_name} in {model_name}")
-        logger.info(f"Values: {value_counts}")
-        
-        return {
-            'counts': value_counts,
-            'values': original_values
-        }
-        
-    except Exception as e:
-        error_details = traceback.format_exc()
-        logger.error(f"Error querying distinct values: {e}\n{error_details}")
-        return {'counts': {}, 'values': {}}
 
 def get_timesheet_entries(models, uid, odoo_db, odoo_password, start_date, end_date=None):
     """Get timesheet entries for a date range"""
@@ -661,7 +384,7 @@ def get_references_data(models, uid, odoo_db, odoo_password):
         st.session_state.last_error = error_details
         return reference_data
 
-def send_email_report(df, selected_date, missing_count, timesheet_count, shift_status_filter=None, reference_date=None):
+def send_email_report(df, selected_date, missing_count, timesheet_count, allocation_filter=None, reference_date=None):
     """Send email with report attached as CSV and summary in the body"""
     try:
         if not st.session_state.email_enabled:
@@ -687,8 +410,8 @@ def send_email_report(df, selected_date, missing_count, timesheet_count, shift_s
         
         # Prepare filter info for email body
         filter_text = ""
-        if shift_status_filter:
-            filter_text = f" with shift status '{shift_status_filter}'"
+        if allocation_filter:
+            filter_text = f" with allocation type '{allocation_filter}'"
             
         # Create email body text
         body = f"""
@@ -786,84 +509,89 @@ def send_designer_email(designer_name, designer_email, report_date, tasks, smtp_
                 days_overdue = (report_date - task_date).days
                 max_days_overdue = max(max_days_overdue, days_overdue)
         
-        # Set subject line based on days overdue
+        # Add urgency to subject line based on age of most overdue task
+        urgency_prefix = ""
         if max_days_overdue >= 2:
-            msg['Subject'] = "Heads-Up: You've Missed Logging Hours for 2 Days"
-        else:
-            msg['Subject'] = "Quick Nudge – Log Your Hours"
+            urgency_prefix = "IMMEDIATE ACTION REQUIRED: "
+        elif max_days_overdue == 1:
+            urgency_prefix = "REMINDER: "
+            
+        msg['Subject'] = f"{urgency_prefix}Missing Timesheet Alert - {report_date.strftime('%Y-%m-%d')}"
         
-        # Create email body based on days overdue
+        # Create urgency message based on most overdue task
+        urgency_message = ""
+        if max_days_overdue >= 2:
+            urgency_message = f"""
+            <p style="color: red; font-weight: bold; font-size: 16px; background-color: #ffeeee; padding: 10px; border: 2px solid red;">
+            URGENT ACTION REQUIRED: You have tasks that are {max_days_overdue} days overdue. 
+            Your managers will be notified about these missing timesheets immediately.
+            Please complete your timesheets as a top priority.
+            </p>
+            """
+        elif max_days_overdue == 1:
+            urgency_message = """
+            <p style="color: orange; font-weight: bold; padding: 8px; background-color: #fff8ee; border: 1px solid orange;">
+            REMINDER: These tasks are from yesterday and need immediate attention. Please log your 
+            time as soon as possible.
+            </p>
+            """
+        
+        # Create email body text
         date_str = report_date.strftime('%Y-%m-%d')
         
-        if max_days_overdue >= 2:
-            # 2+ days overdue template
-            body = f"""
-            <html>
-            <body style="font-family: Arial, sans-serif; line-height: 1.5;">
-            <p>Hi {designer_name},</p>
+        body = f"""
+        <html>
+        <body>
+        <h2>Missing Timesheet Alert - {date_str}</h2>
+        <p>Hello {designer_name},</p>
+        
+        <p>You have {len(tasks)} task(s) without timesheet entries for {date_str}. 
+        Please log your time as soon as possible.</p>
+        
+        {urgency_message}
+        
+        <h3>Tasks missing timesheet entries:</h3>
+        <table border="1" cellpadding="5">
+        <tr>
+            <th>Project</th>
+            <th>Task</th>
+            <th>Time</th>
+            <th>Allocated Hours</th>
+            <th>Days Overdue</th>
+        </tr>
+        """
+        
+        # Add tasks to the email with individual overdue status
+        for task in tasks:
+            # Calculate or extract days overdue for this specific task
+            days_overdue = task.get('Days Overdue', 0)
+            if days_overdue == 0 and 'Date' in task:
+                task_date = datetime.strptime(task['Date'], "%Y-%m-%d").date()
+                days_overdue = (report_date - task_date).days
             
-            <p>It looks like no hours have been logged for the past two days for the following task(s):</p>
+            # Create a style based on days overdue
+            urgency_style = ""
+            if days_overdue >= 2:
+                urgency_style = 'style="background-color: #ffeeee; color: red; font-weight: bold;"'
+            elif days_overdue == 1:
+                urgency_style = 'style="background-color: #fff8ee; color: orange;"'
+                
+            body += f"""
+            <tr>
+                <td>{task.get('Project', 'Unknown')}</td>
+                <td>{task.get('Task', 'Unknown')}</td>
+                <td>{task.get('Start Time', 'Unknown')} - {task.get('End Time', 'Unknown')}</td>
+                <td>{task.get('Allocated Hours', 0)}</td>
+                <td {urgency_style}>{days_overdue} days</td>
+            </tr>
             """
             
-            # Add task details in bullet points
-            for task in tasks:
-                # Get client success member
-                client_success = task.get('Client Success Member', 'Not specified')
-                
-                # Get task dates (could be multiple dates)
-                task_date = task.get('Date', date_str)
-                
-                body += f"""
-                <ul style="list-style-type: disc; padding-left: 20px;">
-                    <li><strong>Task:</strong> {task.get('Task', 'Unknown')}</li>
-                    <li><strong>Project:</strong> {task.get('Project', 'Unknown')}</li>
-                    <li><strong>Assignment Dates:</strong> {task_date}</li>
-                    <li><strong>Client Success Contact:</strong> {client_success}</li>
-                </ul>
-                """
-            
-            body += """
-            <p>We completely understand things can get busy — but consistent time logging helps us improve project planning and smooth reporting.</p>
-            
-            <p>If something's holding you back from logging your hours, just reach out. We're here to help.</p>
-            </body>
-            </html>
-            """
-            
-        else:
-            # 1 day overdue template
-            body = f"""
-            <html>
-            <body style="font-family: Arial, sans-serif; line-height: 1.5;">
-            <p>Hi {designer_name},</p>
-            
-            <p>This is a gentle reminder to log your hours for the task below — It takes a minute, but the impact is big:</p>
-            """
-            
-            # Add task details in bullet points (for each task)
-            for task in tasks:
-                # Get client success member
-                client_success = task.get('Client Success Member', 'Not specified')
-                
-                # Get task date and time
-                task_date = task.get('Date', date_str)
-                task_time = f"{task.get('Start Time', 'Unknown')} - {task.get('End Time', 'Unknown')}"
-                
-                body += f"""
-                <ul style="list-style-type: disc; padding-left: 20px;">
-                    <li><strong>Task:</strong> {task.get('Task', 'Unknown')}</li>
-                    <li><strong>Project:</strong> {task.get('Project', 'Unknown')}</li>
-                    <li><strong>Assigned on:</strong> {task_date} {task_time}</li>
-                    <li><strong>Client Success Contact:</strong> {client_success}</li>
-                </ul>
-                """
-            
-            body += """
-            <p>Taking a minute now helps us stay on top of things later 🙌</p>
-            <p>Let us know if you need any support with this.</p>
-            </body>
-            </html>
-            """
+        body += """
+        </table>
+        <p>This is an automated message from the Missing Timesheet Reporter tool.</p>
+        </body>
+        </html>
+        """
         
         # Attach email body
         msg.attach(MIMEText(body, 'html'))
@@ -882,7 +610,7 @@ def send_designer_email(designer_name, designer_email, report_date, tasks, smtp_
         logger.error(f"Error sending email to {designer_name}: {e}\n{error_details}")
         return False
 
-def generate_missing_timesheet_report(selected_date, shift_status_filter=None, send_email=False, send_designer_emails=False):
+def generate_missing_timesheet_report(selected_date, allocation_filter=None, send_email=False, send_designer_emails=False):
     """
     Generate report of planning slots without timesheet entries for a date range from reference_date to selected_date
     """
@@ -892,29 +620,25 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
     odoo_password = st.session_state.odoo_password
     reference_date = st.session_state.reference_date
     
-    if uid and models:
-        st.session_state.shift_status_values = get_field_selection_values(
-            models, uid, odoo_db, odoo_password, 'planning.slot', 'x_studio_shift_status'
-        )
-        logger.info(f"Shift status values: {st.session_state.shift_status_values}")
-    
     if not uid or not models:
         st.error("Not connected to Odoo")
         return pd.DataFrame(), 0, 0
     
     try:
         # Step 1: Get all planning slots for the date range (reference_date to selected_date) with optional allocation filter
-        planning_slots = get_planning_slots(models, uid, odoo_db, odoo_password, reference_date, selected_date, shift_status_filter)
+        planning_slots = get_planning_slots(models, uid, odoo_db, odoo_password, reference_date, selected_date, allocation_filter)
         
-        # Apply enhanced filtering for shift status
-        if shift_status_filter:
-            planning_slots = enhanced_shift_status_filtering(
-                planning_slots, 
-                shift_status_filter,
-                st.session_state.shift_status_values
-            )
-            logger.info(f"Enhanced filtering returned {len(planning_slots)} slots with status matching '{shift_status_filter}'")
-                
+        # Post-process to ensure only slots with the correct allocation type are included
+        # This adds a second layer of filtering in case the Odoo query didn't filter properly
+        if allocation_filter:
+            filtered_slots = []
+            for slot in planning_slots:
+                slot_allocation = slot.get('allocation_type', '').lower()
+                if slot_allocation == allocation_filter.lower():
+                    filtered_slots.append(slot)
+            planning_slots = filtered_slots
+            logger.info(f"Post-filtered to {len(planning_slots)} slots with allocation_type={allocation_filter}")
+        
         # Step 2: Get all timesheet entries for the date range
         timesheet_entries = get_timesheet_entries(models, uid, odoo_db, odoo_password, reference_date, selected_date)
         
@@ -1027,7 +751,6 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
         designer_name_only_to_timesheet = {}
         for entry in timesheet_entries:
             employee_name = None
-            entry_date = entry.get('date', None)
             
             # Get employee name
             if 'employee_id' in entry and entry['employee_id'] and isinstance(entry['employee_id'], list) and len(entry['employee_id']) > 1:
@@ -1108,22 +831,6 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
             has_timesheet = False
             hours_logged = 0.0
             
-            # Extract task date from slot data
-            task_date = None
-            if slot.get('start_datetime') and isinstance(slot.get('start_datetime'), str):
-                try:
-                    # Convert string to datetime
-                    task_date = datetime.strptime(slot.get('start_datetime'), "%Y-%m-%d %H:%M:%S").date()
-                except:
-                    # If parsing fails, use the selected date
-                    task_date = selected_date
-            else:
-                # Fallback if no valid start_datetime
-                task_date = selected_date
-            
-            # Format the task date as a string for comparison with timesheet dates
-            task_date_str = task_date.strftime("%Y-%m-%d")
-            
             # First check: exact match by resource_id + task_id + project_id
             key = (resource_id, task_id, project_id)
             if key in resource_task_to_timesheet:
@@ -1141,45 +848,20 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                 # Only consider it a valid timesheet if hours logged are greater than 0
                 # AND the entry was created by the designer (their user_id is in the user_ids set)
                 user_ids = resource_task_to_timesheet[key]['user_ids']
-                
-                # Check if any of the timesheet entries match the specific date
-                matching_entries = [
-                    entry for entry in resource_task_to_timesheet[key]['entries']
-                    if entry.get('date') == task_date_str
-                ]
-                
-                if matching_entries:
-                    # Calculate hours for just the matching date
-                    date_specific_hours = sum(entry.get('unit_amount', 0) for entry in matching_entries)
-                    has_timesheet = date_specific_hours > 0 
+                has_timesheet = (hours_logged > 0) and (resource_user_id in user_ids if resource_user_id else False)
             
             # Second check: try matching by name + task_id + project_id
             if not has_timesheet and resource_name != "Unknown":
                 name_key = (resource_name, task_id, project_id)
                 if name_key in designer_name_to_timesheet:
-                    # Check if any of the timesheet entries match the specific date
-                    matching_entries = [
-                        entry for entry in designer_name_to_timesheet[name_key]['entries']
-                        if entry.get('date') == task_date_str
-                    ]
-                    
-                    if matching_entries:
-                        # Calculate hours for just the matching date
-                        date_specific_hours = sum(entry.get('unit_amount', 0) for entry in matching_entries)
-                        has_timesheet = date_specific_hours > 0
+                    hours_logged = designer_name_to_timesheet[name_key]['hours']
+                    has_timesheet = hours_logged > 0
             
-            # Last resort: check if designer has ANY timesheet for THIS SPECIFIC DAY
-            # if not has_timesheet and resource_name != "Unknown" and resource_name in designer_name_only_to_timesheet:
-            #     # Filter entries to only include those for the specific task date
-            #     matching_entries = [
-            #         entry for entry in designer_name_only_to_timesheet[resource_name]['entries']
-            #         if entry.get('date') == task_date_str
-            #     ]
-                
-            #     if matching_entries:
-            #         # Calculate hours for just the matching date
-            #         date_specific_hours = sum(entry.get('unit_amount', 0) for entry in matching_entries)
-            #         has_timesheet = date_specific_hours > 0
+            # Last resort: check if designer has ANY timesheet for the day
+            if not has_timesheet and resource_name != "Unknown":
+                if resource_name in designer_name_only_to_timesheet:
+                    hours_logged = designer_name_only_to_timesheet[resource_name]['hours']
+                    has_timesheet = hours_logged > 0
             
             # Get other slot info for display
             slot_name = slot.get('name', 'Unnamed Slot')
@@ -1188,7 +870,8 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
             if isinstance(slot_name, bool):
                 slot_name = str(slot_name)
             
-            shift_status = slot.get('x_studio_shift_status', 'Unknown')
+            # Get allocation type for display
+            allocation_type = slot.get('allocation_type', 'Unknown')
             
             # Get client success member (create_uid)
             client_success_name = "Unknown"
@@ -1222,6 +905,19 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
             
             # Get time allocation
             allocated_hours = slot.get('allocated_hours', 0.0)
+            
+            # Extract task date from slot data
+            task_date = None
+            if start_datetime and isinstance(start_datetime, str):
+                try:
+                    # Convert string to datetime
+                    task_date = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M:%S").date()
+                except:
+                    # If parsing fails, use the selected date
+                    task_date = selected_date
+            else:
+                # Fallback if no valid start_datetime
+                task_date = selected_date
                 
             # Calculate days since task date for urgency
             reference_point = selected_date
@@ -1241,7 +937,7 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     'Start Time': str(start_time),
                     'End Time': str(end_time),
                     'Allocated Hours': float(allocated_hours),
-                    'Shift Status': str(slot.get('x_studio_shift_status', 'Unknown')),  # Use actual status from slot
+                    'Allocation Type': str(allocation_type),
                     'Days Overdue': int(days_since_task),
                     'Urgency': 'High' if days_since_task >= 2 else ('Medium' if days_since_task == 1 else 'Low')
                 }
@@ -1268,11 +964,27 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
             df = pd.DataFrame(report_data)
             
             # Count missing entries based on what's in report_data when not in debug mode
-            missing_count = len(report_data)
+            missing_count = len(report_data) if not st.session_state.debug_mode else len([slot for slot in planning_slots if not (
+                # First check: exact match by resource_id + task_id + project_id
+                (slot.get('resource_id') and slot.get('task_id') and slot.get('project_id') and 
+                (slot['resource_id'][0], slot['task_id'][0], slot['project_id'][0]) in resource_task_to_timesheet and
+                resource_task_to_timesheet[(slot['resource_id'][0], slot['task_id'][0], slot['project_id'][0])]['hours'] > 0) or
+                
+                # Second check: try matching by name + task_id + project_id
+                (slot.get('resource_id') and slot.get('task_id') and slot.get('project_id') and
+                len(slot['resource_id']) > 1 and
+                (slot['resource_id'][1], slot['task_id'][0], slot['project_id'][0]) in designer_name_to_timesheet and
+                designer_name_to_timesheet[(slot['resource_id'][1], slot['task_id'][0], slot['project_id'][0])]['hours'] > 0) or
+                
+                # Last resort: check if designer has ANY timesheet for the day
+                (slot.get('resource_id') and len(slot['resource_id']) > 1 and
+                slot['resource_id'][1] in designer_name_only_to_timesheet and
+                designer_name_only_to_timesheet[slot['resource_id'][1]]['hours'] > 0)
+            )])
             
             # Send email report if requested
             if send_email and (missing_count > 0 or st.session_state.debug_mode):
-                email_sent = send_email_report(df, selected_date, missing_count, len(timesheet_entries), shift_status_filter, reference_date)
+                email_sent = send_email_report(df, selected_date, missing_count, len(timesheet_entries), allocation_filter, reference_date)
                 if email_sent:
                     st.success(f"Email report sent to {st.session_state.email_recipient}")
                 else:
@@ -1401,12 +1113,12 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
             # Return empty DataFrame with columns
             empty_df = pd.DataFrame(columns=[
                 'Date', 'Designer', 'Project', 'Client Success Member', 'Task', 'Slot Name', 
-                'Start Time', 'End Time', 'Allocated Hours', 'Shift Status', 'Days Overdue', 'Urgency'
+                'Start Time', 'End Time', 'Allocated Hours', 'Allocation Type', 'Days Overdue', 'Urgency'
             ])
             
             # Send email for empty report if requested
             if send_email:
-                email_sent = send_email_report(empty_df, selected_date, 0, len(timesheet_entries), shift_status_filter, reference_date)
+                email_sent = send_email_report(empty_df, selected_date, 0, len(timesheet_entries), allocation_filter, reference_date)
                 if email_sent:
                     st.success(f"Email report sent to {st.session_state.email_recipient}")
                 else:
@@ -1429,50 +1141,20 @@ def send_teams_webhook_notification(designer_name, webhook_url, tasks, report_da
             days_overdue = task.get('Days Overdue', 0)
             max_days_overdue = max(max_days_overdue, days_overdue)
         
+        # Create urgency indicator
+        urgency_indicator = ""
+        if max_days_overdue >= 2:
+            urgency_indicator = "🔴 URGENT 🔴 "
+        elif max_days_overdue == 1:
+            urgency_indicator = "🟠 REMINDER 🟠 "
+        
         # Create date string
         date_str = report_date.strftime('%Y-%m-%d')
         
-        # Example task for message (just use the first one)
-        task = tasks[0] if tasks else {}
-        task_name = task.get('Task', 'Unknown')
-        project_name = task.get('Project', 'Unknown')
-        client_success = task.get('Client Success Member', 'Not specified')
-        task_date = task.get('Date', date_str)
-        
-        # Create message based on overdue status
-        if max_days_overdue >= 2:
-            message = {
-                "text": f"**Heads-Up: You've Missed Logging Hours for 2 Days**\n\n"
-                       f"Hi {designer_name},\n\n"
-                       f"It looks like no hours have been logged for the past two days for the following task:\n\n"
-                       f"* **Task:** {task_name}\n"
-                       f"* **Project:** {project_name}\n"
-                       f"* **Assignment Dates:** {task_date}\n"
-                       f"* **Client Success Contact:** {client_success}\n\n"
-                       f"We completely understand things can get busy — but consistent time logging helps us improve project planning and smooth reporting.\n\n"
-                       f"If something's holding you back from logging your hours, just reach out. We're here to help."
-            }
-        else:
-            # Format the time if available
-            time_str = ""
-            if 'Start Time' in task and 'End Time' in task:
-                time_str = f"{task.get('Start Time', '')} - {task.get('End Time', '')}"
-            
-            message = {
-                "text": f"**Quick Nudge – Log Your Hours**\n\n"
-                       f"Hi {designer_name},\n\n"
-                       f"This is a gentle reminder to log your hours for the task below — It takes a minute, but the impact is big:\n\n"
-                       f"* **Task:** {task_name}\n"
-                       f"* **Project:** {project_name}\n"
-                       f"* **Assigned on:** {task_date} {time_str}\n"
-                       f"* **Client Success Contact:** {client_success}\n\n"
-                       f"Taking a minute now helps us stay on top of things later 🙌\n\n"
-                       f"Let us know if you need any support with this."
-            }
-        
-        # If there are multiple tasks, add a note
-        if len(tasks) > 1:
-            message["text"] += f"\n\n**Note:** There are {len(tasks)} tasks in total requiring attention."
+        # Simple text message format (most compatible)
+        message = {
+            "text": f"{urgency_indicator}**Missing Timesheet Alert - {date_str}**\n\nHello {designer_name},\n\nYou have {len(tasks)} task(s) without timesheet entries. Please log your time as soon as possible."
+        }
         
         # Send to Teams webhook
         response = requests.post(webhook_url, json=message)
@@ -1500,46 +1182,22 @@ def main():
         st.session_state.debug_mode = st.checkbox("Debug Mode", st.session_state.debug_mode, 
                                                  help="Show all planning slots, not just those missing timesheets")
         
-        # Shift Status filter
-        st.subheader("Shift Status Filter")
-        shift_status_filter = st.radio(
-            "Show slots with shift status:",
-            ["All", "Planned (Confirmed)", "Forecasted (Unconfirmed)"],
-            index=1,  # Default to "Planned (Confirmed)"
-            help="Filter planning slots by their shift status"
+        # Confirmation status filter
+        st.subheader("Allocation Type Filter")
+        allocation_filter = st.radio(
+            "Show slots with allocation type:",
+            ["All", "Planning (Confirmed)", "Forecast (Unconfirmed)"],
+            index=1,  # Default to "Planning (Confirmed)"
+            help="Filter planning slots by their allocation type"
         )
 
-        # Map the human label → actual value stored in x_studio_shift_status
-        if st.session_state.shift_status_values:
-            # If we have values from the database, try to match them
-            possible_values = {value.lower(): key for key, value in st.session_state.shift_status_values.items()}
-            planned_value = None
-            forecast_value = None
-            for db_value, db_key in possible_values.items():
-                if "confirm" in db_value or "plan" in db_value:
-                    planned_value = db_key
-                if "unconfirm" in db_value or "forecast" in db_value:
-                    forecast_value = db_key
-            
-            # Use found values or fallbacks
-            STATUS_MAP = {
-                "Planned (Confirmed)": planned_value or "Planned",
-                "Forecasted (Unconfirmed)": forecast_value or "Forecasted"
-            }
-        else:
-            # Fallback to default values if we haven't loaded the values yet
-            STATUS_MAP = {
-                "Planned (Confirmed)": "confirmed",
-                "Forecasted (Unconfirmed)": "unconfirmed"
-            }
-
-        # Log what values we're using
-        logger.info(f"Using status map: {STATUS_MAP}")
-        if shift_status_filter == "All":
-            st.session_state.shift_status_filter = None
-        else:
-            st.session_state.shift_status_filter = STATUS_MAP[shift_status_filter]
-
+        # Update the allocation filter value based on selection
+        if allocation_filter == "All":
+            st.session_state.allocation_filter = None
+        elif allocation_filter == "Planning (Confirmed)":
+            st.session_state.allocation_filter = "planning"
+        elif allocation_filter == "Forecast (Unconfirmed)":
+            st.session_state.allocation_filter = "forecast"
         
         # Reference date setting for filtering historical tasks
         st.subheader("Reference Date")
@@ -1833,14 +1491,6 @@ def main():
                         st.session_state.odoo_username = odoo_username
                         st.session_state.odoo_password = odoo_password
                         st.success("Connected successfully!")
-                        
-                        # Add this code here
-                        shift_values = get_field_selection_values(
-                            models, uid, odoo_db, odoo_password, 
-                            'planning.slot', 'x_studio_shift_status'
-                        )
-                        st.session_state.shift_status_values = shift_values
-                        logger.info(f"Shift status values: {shift_values}")
                     else:
                         st.error("Failed to connect to Odoo")
     
@@ -1848,26 +1498,6 @@ def main():
     # Connection status
     if st.session_state.odoo_uid and st.session_state.odoo_models:
         st.success(f"Connected to Odoo as {st.session_state.odoo_username}")
-        
-        # Add the debug button right here, after the connection success message
-        if st.session_state.debug_mode:
-            if st.button("Show Shift Status Values"):
-                if st.session_state.shift_status_values:
-                    st.write("Available shift status values:", st.session_state.shift_status_values)
-                    # Also show what would be mapped for UI labels
-                    st.write("UI mapping:")
-                    for label, value in {
-                        "Planned (Confirmed)": "confirmed",
-                        "Forecasted (Unconfirmed)": "unconfirmed"
-                    }.items():
-                        matching_db_value = None
-                        for db_key, db_val in st.session_state.shift_status_values.items():
-                            if value.lower() in db_val.lower() or db_val.lower() in value.lower():
-                                matching_db_value = f"{db_key} ({db_val})"
-                                break
-                        st.write(f"  {label} → {matching_db_value or 'No match found'}")
-                else:
-                    st.write("No shift status values loaded yet")
     else:
         st.warning("Not connected to Odoo. Please connect using the sidebar.")
         if st.button("Connect to Odoo"):
@@ -1883,14 +1513,6 @@ def main():
                     st.session_state.odoo_uid = uid
                     st.session_state.odoo_models = models
                     st.success("Connected successfully!")
-                    
-                    # Add this code here
-                    shift_values = get_field_selection_values(
-                        models, uid, st.session_state.odoo_db, st.session_state.odoo_password, 
-                        'planning.slot', 'x_studio_shift_status'
-                    )
-                    st.session_state.shift_status_values = shift_values
-                    logger.info(f"Shift status values: {shift_values}")
                 else:
                     st.error("Failed to connect to Odoo")
     
@@ -1927,19 +1549,16 @@ def main():
         if not st.session_state.odoo_uid or not st.session_state.odoo_models:
             st.error("Not connected to Odoo. Please connect first.")
         else:
-            # Display shift status filter info
-            if st.session_state.shift_status_filter:
-                shift_status_label = (
-                    "Planned (Confirmed)" if st.session_state.shift_status_filter == "confirmed"
-                    else "Forecasted (Unconfirmed)"
-                )
-                st.info(f"Filtering for {shift_status_label} planning slots")
+            # Display allocation type filter info
+            if st.session_state.allocation_filter:
+                allocation_label = "Planning (Confirmed)" if st.session_state.allocation_filter.lower() == "planning" else "Forecast (Unconfirmed)"
+                st.info(f"Filtering for {allocation_label} planning slots")
             
             with st.spinner("Generating timesheet report..."):
                 # Generate the report
                 df, missing_count, timesheet_count = generate_missing_timesheet_report(
                     selected_date, 
-                    st.session_state.shift_status_filter,
+                    st.session_state.allocation_filter,
                     send_email_report
                 )
                 
@@ -1951,8 +1570,9 @@ def main():
                     
                 if missing_count > 0:
                     filter_text = ""
-                    if st.session_state.shift_status_filter:
-                        filter_text = f" with shift status '{st.session_state.shift_status_filter}'"
+                    if st.session_state.allocation_filter:
+                        filter_text = f" with allocation type '{st.session_state.allocation_filter}'"
+                    
                     st.warning(f"Found {missing_count} planning slots{filter_text} without timesheet entries from {st.session_state.reference_date.strftime('%Y-%m-%d')} to {selected_date.strftime('%Y-%m-%d')}")
                     
                     if not df.empty:
@@ -2029,8 +1649,9 @@ def main():
                         )
                 else:
                     filter_text = ""
-                    if st.session_state.shift_status_filter:
-                        filter_text = f" (shift status: '{st.session_state.shift_status_filter}')"
+                    if st.session_state.allocation_filter:
+                        filter_text = f" (allocation type: '{st.session_state.allocation_filter}')"
+                        
                     st.success(f"All planning slots{filter_text} have corresponding timesheet entries!")
                     
                     if not df.empty and st.session_state.debug_mode:
@@ -2043,243 +1664,7 @@ def main():
             if st.session_state.last_error and st.session_state.debug_mode:
                 with st.expander("Error Details", expanded=False):
                     st.code(st.session_state.last_error)
-    if st.session_state.debug_mode:
-        st.markdown("---")
-        st.subheader("🔍 Debugging Tools")
-        
-        debug_tab1, debug_tab2, debug_tab3 = st.tabs(["Shift Status Values", "Planning Slots Query", "Timesheet Matching"])
-        
-        with debug_tab1:
-            st.markdown("### Debug Shift Status Values")
-            st.write("This will extract all possible values for the x_studio_shift_status field")
-            
-            if st.button("Extract Shift Status Values"):
-                if not st.session_state.odoo_uid or not st.session_state.odoo_models:
-                    st.error("Not connected to Odoo. Please connect first.")
-                else:
-                    with st.spinner("Extracting shift status values..."):
-                        debug_shift_status_values(
-                            st.session_state.odoo_models,
-                            st.session_state.odoo_uid,
-                            st.session_state.odoo_db,
-                            st.session_state.odoo_password
-                        )
-            
-            # Display current mapping
-            if st.session_state.shift_status_values:
-                st.write("Current shift status values in memory:")
-                for key, value in st.session_state.shift_status_values.items():
-                    st.write(f"- Key: '{key}', Label: '{value}'")
-            
-            # Option to manually set mapping
-            st.markdown("### Manual Mapping Override")
-            st.write("If automatic mapping isn't working, you can manually define the mappings:")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                confirmed_key = st.text_input("Key for 'Confirmed' status:", 
-                                            key="confirmed_key_override")
-            with col2:
-                forecasted_key = st.text_input("Key for 'Forecasted' status:", 
-                                            key="forecasted_key_override")
-            
-            if st.button("Apply Manual Mapping"):
-                if confirmed_key or forecasted_key:
-                    # Create new mapping dictionary
-                    manual_mapping = {}
-                    if confirmed_key:
-                        manual_mapping[confirmed_key] = "Confirmed"
-                    if forecasted_key:
-                        manual_mapping[forecasted_key] = "Forecasted"
-                    
-                    # Update session state
-                    st.session_state.shift_status_values = manual_mapping
-                    st.success("Manual mapping applied!")
-                    
-            # Query actual database values
-            st.markdown("### Query Actual Database Values")
-            if st.button("Query Distinct Shift Status Values"):
-                if not st.session_state.odoo_uid or not st.session_state.odoo_models:
-                    st.error("Not connected to Odoo. Please connect first.")
-                else:
-                    with st.spinner("Querying database..."):
-                        result = query_distinct_field_values(
-                            st.session_state.odoo_models,
-                            st.session_state.odoo_uid,
-                            st.session_state.odoo_db,
-                            st.session_state.odoo_password,
-                            'planning.slot',
-                            'x_studio_shift_status',
-                            5000  # Increased limit to get more comprehensive results
-                        )
-                        
-                        if result['counts']:
-                            st.write("Values found in the database:")
-                            for value, count in sorted(result['counts'].items(), key=lambda x: x[1], reverse=True):
-                                st.write(f"- '{value}': {count} records")
-                            
-                            # Automatically create mappings based on keywords
-                            st.write("Suggested mappings:")
-                            confirmed_key = None
-                            forecasted_key = None
-                            
-                            for value_str in result['counts'].keys():
-                                value_lower = value_str.lower()
-                                if "confirm" in value_lower or "plan" in value_lower:
-                                    confirmed_key = result['values'][value_str]
-                                    st.write(f"- Confirmed/Planned: '{value_str}'")
-                                elif "unconfirm" in value_lower or "forecast" in value_lower:
-                                    forecasted_key = result['values'][value_str]
-                                    st.write(f"- Forecasted/Unconfirmed: '{value_str}'")
-                            
-                            # Option to apply suggested mappings
-                            if confirmed_key is not None or forecasted_key is not None:
-                                if st.button("Apply Suggested Mappings"):
-                                    mapping = {}
-                                    if confirmed_key is not None:
-                                        mapping[confirmed_key] = "Confirmed"
-                                    if forecasted_key is not None:
-                                        mapping[forecasted_key] = "Forecasted"
-                                        
-                                    st.session_state.shift_status_values = mapping
-                                    st.success("Applied suggested mappings!")
-                        else:
-                            st.warning("No values found or error occurred")
-        
-        with debug_tab2:
-            st.markdown("### Debug Planning Slot Query")
-            st.write("Test direct query for planning slots with specific settings")
-            
-            # Date range for test
-            test_start_date = st.date_input("Test Start Date", 
-                                        value=datetime.now().date() - timedelta(days=7),
-                                        key="test_start_date")
-            
-            test_end_date = st.date_input("Test End Date", 
-                                        value=datetime.now().date(),
-                                        key="test_end_date")
-            
-            # Status filter options
-            test_status = st.selectbox("Test Status Filter",
-                                    options=["None"] + list(st.session_state.shift_status_values.values()) 
-                                    if st.session_state.shift_status_values 
-                                    else ["None", "confirmed", "forecasted", "planned", "unconfirmed"],
-                                    key="test_status")
-            
-            if test_status == "None":
-                test_status = None
-            
-            if st.button("Test Planning Slot Query"):
-                if not st.session_state.odoo_uid or not st.session_state.odoo_models:
-                    st.error("Not connected to Odoo. Please connect first.")
-                else:
-                    with st.spinner("Querying planning slots..."):
-                        test_slots = get_planning_slots(
-                            st.session_state.odoo_models,
-                            st.session_state.odoo_uid,
-                            st.session_state.odoo_db,
-                            st.session_state.odoo_password,
-                            test_start_date,
-                            test_end_date,
-                            test_status
-                        )
-                        
-                        st.write(f"Found {len(test_slots)} planning slots")
-                        
-                        # Show sample of the slots
-                        if test_slots:
-                            sample_size = min(5, len(test_slots))
-                            st.write(f"Sample of {sample_size} slots:")
-                            for i in range(sample_size):
-                                st.json(test_slots[i])
-                            
-                            # Count by status
-                            status_counts = {}
-                            for slot in test_slots:
-                                status = slot.get('x_studio_shift_status', 'None')
-                                status_counts[status] = status_counts.get(status, 0) + 1
-                            
-                            st.write("Status distribution:")
-                            for status, count in status_counts.items():
-                                st.write(f"- '{status}': {count} slots")
-        
-        with debug_tab3:
-            st.markdown("### Debug Timesheet Matching")
-            st.write("Test the logic that matches timesheets to planning slots")
-            
-            # Simple test with a specific date
-            test_match_date = st.date_input("Test Date for Matching", 
-                                            value=datetime.now().date() - timedelta(days=1),
-                                            key="test_match_date")
-            
-            if st.button("Test Timesheet Matching"):
-                if not st.session_state.odoo_uid or not st.session_state.odoo_models:
-                    st.error("Not connected to Odoo. Please connect first.")
-                else:
-                    with st.spinner("Testing timesheet matching..."):
-                        # Get planning slots
-                        test_slots = get_planning_slots(
-                            st.session_state.odoo_models,
-                            st.session_state.odoo_uid,
-                            st.session_state.odoo_db,
-                            st.session_state.odoo_password,
-                            test_match_date,
-                            test_match_date,
-                            None  # No status filter
-                        )
-                        
-                        # Get timesheet entries
-                        test_entries = get_timesheet_entries(
-                            st.session_state.odoo_models,
-                            st.session_state.odoo_uid,
-                            st.session_state.odoo_db,
-                            st.session_state.odoo_password,
-                            test_match_date,
-                            test_match_date
-                        )
-                        
-                        st.write(f"Found {len(test_slots)} planning slots and {len(test_entries)} timesheet entries")
-                        
-                        # Display some examples of each
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            st.markdown("### Sample Planning Slots")
-                            if test_slots:
-                                for i in range(min(3, len(test_slots))):
-                                    with st.expander(f"Slot {i+1}"):
-                                        st.json(test_slots[i])
-                            else:
-                                st.write("No planning slots found")
-                        
-                        with col2:
-                            st.markdown("### Sample Timesheet Entries")
-                            if test_entries:
-                                for i in range(min(3, len(test_entries))):
-                                    with st.expander(f"Entry {i+1}"):
-                                        st.json(test_entries[i])
-                            else:
-                                st.write("No timesheet entries found")
-                        
-                        # Show raw field formats for comparison
-                        st.markdown("### Field Formats Comparison")
-                        
-                        formats = {
-                            "Planning Slot": {
-                                "resource_id": test_slots[0].get("resource_id") if test_slots else None,
-                                "task_id": test_slots[0].get("task_id") if test_slots else None,
-                                "project_id": test_slots[0].get("project_id") if test_slots else None,
-                                "x_studio_shift_status": test_slots[0].get("x_studio_shift_status") if test_slots else None
-                            },
-                            "Timesheet Entry": {
-                                "employee_id": test_entries[0].get("employee_id") if test_entries else None,
-                                "task_id": test_entries[0].get("task_id") if test_entries else None,
-                                "project_id": test_entries[0].get("project_id") if test_entries else None,
-                                "user_id": test_entries[0].get("user_id") if test_entries else None
-                            }
-                        }
-                        
-                        st.json(formats)
+    
     # Add a section for scheduled reports
     st.subheader("Schedule Daily Reports")
     st.info("""
@@ -2304,14 +1689,14 @@ if __name__ == "__main__":
         parser.add_argument("--headless", action="store_true", help="Run in headless mode")
         parser.add_argument("--date", default="today", help="Date for report (YYYY-MM-DD or 'today')")
         parser.add_argument("--email", action="store_true", help="Send email report")
-        parser.add_argument("--shift-status", default="forecasted", help="Shift status filter (forecasted, planned, or all)")
+        parser.add_argument("--allocation", default="forecast", help="Allocation filter (forecast, planning, or all)")
         parser.add_argument("--designer-emails", action="store_true", help="Send individual emails to designers")
         
         # Need to filter out Streamlit's own arguments
         streamlit_args = []
         our_args = []
         for arg in sys.argv[1:]:
-            if arg.startswith("--headless") or arg.startswith("--date") or arg.startswith("--email") or arg.startswith("--shift-status"):
+            if arg.startswith("--headless") or arg.startswith("--date") or arg.startswith("--email") or arg.startswith("--allocation"):
                 our_args.append(arg)
             else:
                 streamlit_args.append(arg)
@@ -2328,13 +1713,13 @@ if __name__ == "__main__":
                 logger.error(f"Invalid date format: {args.date}. Using today's date.")
                 report_date = datetime.now().date()
         
-        # Set shift status filter
-        if args.shift_status.lower() == "all":
-            shift_status_filter = None
-        elif args.shift_status.lower() == "forecasted":
-            shift_status_filter = "forecasted"
+        # Set allocation filter
+        if args.allocation.lower() == "all":
+            allocation_filter = None
+        elif args.allocation.lower() == "forecast":
+            allocation_filter = "forecast"
         else:
-            shift_status_filter = "planned"  # Default
+            allocation_filter = "planning"  # Default
         
         logger.info(f"Running in headless mode for date {report_date}")
         
@@ -2353,7 +1738,7 @@ if __name__ == "__main__":
             # Generate report and send email
             df, missing_count, timesheet_count = generate_missing_timesheet_report(
                 report_date, 
-                st.session_state.shift_status_filter,
+                allocation_filter,
                 args.email  # Send email if --email flag is provided
             )
             
