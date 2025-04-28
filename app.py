@@ -341,6 +341,230 @@ def get_planning_slots(models, uid, odoo_db, odoo_password, start_date, end_date
         st.error(f"Error fetching planning slots: {e}")
         st.session_state.last_error = error_details
         return []
+def debug_shift_status_values(models, uid, odoo_db, odoo_password):
+    """Extract and display all possible values for x_studio_shift_status field with detailed logging"""
+    try:
+        st.subheader("Debugging Shift Status Values")
+        
+        # Get the field information
+        fields_info = get_model_fields(models, uid, odoo_db, odoo_password, 'planning.slot')
+        
+        # Check if the field exists
+        if 'x_studio_shift_status' not in fields_info:
+            st.error("The field 'x_studio_shift_status' doesn't exist in the planning.slot model")
+            logger.error("The field 'x_studio_shift_status' doesn't exist in the planning.slot model")
+            return
+        
+        # Get field type and information
+        field_info = fields_info['x_studio_shift_status']
+        st.write(f"Field type: {field_info.get('type')}")
+        
+        # Show all field information for debugging
+        st.json(field_info)
+        
+        # If it's a selection field, show all possible values
+        if field_info.get('type') == 'selection':
+            selection_values = field_info.get('selection', [])
+            st.write("Possible values:")
+            for value in selection_values:
+                st.write(f"- Key: '{value[0]}', Label: '{value[1]}'")
+            
+            # Save to session state for reference
+            st.session_state.shift_status_values = dict(selection_values)
+        
+        # Query actual values in the database
+        st.subheader("Values currently in use")
+        
+        try:
+            # Query distinct values in the database
+            distinct_values = models.execute_kw(
+                odoo_db, uid, odoo_password,
+                'planning.slot', 'search_read',
+                [[]],
+                {'fields': ['x_studio_shift_status'], 'limit': 1000}
+            )
+            
+            # Count occurrences of each value
+            value_counts = {}
+            for record in distinct_values:
+                status = record.get('x_studio_shift_status', 'None')
+                value_counts[status] = value_counts.get(status, 0) + 1
+            
+            # Display counts
+            for status, count in sorted(value_counts.items(), key=lambda x: x[1], reverse=True):
+                st.write(f"- '{status}': {count} records")
+            
+            # Also check for any raw database values
+            st.subheader("Advanced: Raw Database Query")
+            st.write("This section attempts a lower-level query to get all possible values")
+            
+            try:
+                # Try a direct SQL query if the ORM approach isn't showing all values
+                # Note: This may not work depending on Odoo's XML-RPC permissions
+                query = """
+                SELECT DISTINCT x_studio_shift_status, COUNT(*) as count
+                FROM planning_slot
+                GROUP BY x_studio_shift_status
+                ORDER BY count DESC
+                """
+                
+                sql_result = models.execute_kw(
+                    odoo_db, uid, odoo_password,
+                    'planning.slot', 'query', [query]
+                )
+                
+                st.write("SQL Query Result:")
+                st.json(sql_result)
+            except Exception as e:
+                st.warning(f"Direct SQL query not supported: {e}")
+                
+        except Exception as e:
+            st.error(f"Error querying distinct values: {e}")
+            logger.error(f"Error querying distinct values: {e}")
+    
+    except Exception as e:
+        error_details = traceback.format_exc()
+        logger.error(f"Error debugging shift status values: {e}\n{error_details}")
+        st.error(f"Error debugging shift status values: {e}")
+        st.session_state.last_error = error_details
+
+
+def enhanced_shift_status_filtering(planning_slots, shift_status_filter, shift_status_values=None):
+    """
+    Enhanced filtering logic for planning slots based on shift status.
+    This handles different possible representations and values for shift status.
+    
+    Args:
+        planning_slots: List of planning slot dictionaries
+        shift_status_filter: The status to filter by (e.g., "confirmed", "forecasted")
+        shift_status_values: Dictionary mapping database values to display values (optional)
+        
+    Returns:
+        List of filtered planning slots
+    """
+    if not shift_status_filter or not planning_slots:
+        return planning_slots
+    
+    logger.info(f"Filtering {len(planning_slots)} slots with enhanced filter: '{shift_status_filter}'")
+    
+    # Convert shift_status_filter to lowercase for case-insensitive matching
+    shift_lower = shift_status_filter.lower()
+    
+    # Track what values we've seen for debugging
+    all_status_values = set()
+    matched_values = set()
+    
+    # If we have shift_status_values from the database, use them for reverse lookup
+    db_keys = []
+    if shift_status_values:
+        # Find all database keys that might correspond to our filter
+        for db_key, label in shift_status_values.items():
+            all_status_values.add(f"{db_key}:{label}")
+            label_lower = label.lower()
+            if shift_lower in label_lower or label_lower in shift_lower:
+                db_keys.append(db_key)
+                logger.info(f"Found matching database key: '{db_key}' for label '{label}'")
+    
+    # Filter the slots
+    filtered_slots = []
+    for slot in planning_slots:
+        # Get the status value - could be a string or other format
+        raw_status = slot.get('x_studio_shift_status')
+        
+        # Track all values we see
+        all_status_values.add(str(raw_status))
+        
+        # Convert to string if it's not
+        slot_status = str(raw_status).lower() if raw_status is not None else ""
+        
+        # Skip empty status if filtering is active
+        if not slot_status and shift_status_filter:
+            continue
+        
+        # Check various matching conditions
+        is_match = False
+        
+        # Direct match by database key
+        if db_keys and raw_status in db_keys:
+            is_match = True
+            matched_values.add(f"db_key:{raw_status}")
+        
+        # String matching heuristics for common keywords
+        elif "confirm" in shift_lower and ("confirm" in slot_status or "plan" in slot_status):
+            is_match = True
+            matched_values.add(f"keyword_confirm:{slot_status}")
+        elif "plan" in shift_lower and "plan" in slot_status:
+            is_match = True
+            matched_values.add(f"keyword_plan:{slot_status}")
+        elif any(term in shift_lower for term in ["unconfirm", "forecast"]) and \
+             any(term in slot_status for term in ["unconfirm", "forecast"]):
+            is_match = True
+            matched_values.add(f"keyword_forecast:{slot_status}")
+        elif shift_lower == slot_status:
+            is_match = True
+            matched_values.add(f"exact:{slot_status}")
+        
+        if is_match:
+            filtered_slots.append(slot)
+    
+    logger.info(f"Enhanced filtering: started with {len(planning_slots)} slots, returned {len(filtered_slots)}")
+    logger.info(f"All status values seen: {sorted(all_status_values)}")
+    logger.info(f"Matched values: {sorted(matched_values)}")
+    
+    return filtered_slots
+
+def query_distinct_field_values(models, uid, odoo_db, odoo_password, model_name, field_name, limit=1000):
+    """
+    Query all distinct values for a specific field in the database.
+    This is more reliable than relying on selection field definitions which might be out of sync.
+    
+    Args:
+        models: Odoo models object
+        uid: User ID
+        odoo_db: Database name
+        odoo_password: Password
+        model_name: Model to query (e.g., 'planning.slot')
+        field_name: Field to get distinct values for (e.g., 'x_studio_shift_status')
+        limit: Maximum number of records to retrieve
+        
+    Returns:
+        Dictionary mapping values to their counts in the database
+    """
+    try:
+        # Search for all records with this field
+        records = models.execute_kw(
+            odoo_db, uid, odoo_password,
+            model_name, 'search_read',
+            [[]], 
+            {'fields': [field_name], 'limit': limit}
+        )
+        
+        # Count the occurrences of each value
+        value_counts = {}
+        for record in records:
+            value = record.get(field_name, None)
+            value_str = str(value) if value is not None else 'None'
+            value_counts[value_str] = value_counts.get(value_str, 0) + 1
+        
+        # Also store the original values (not just strings)
+        original_values = {}
+        for record in records:
+            value = record.get(field_name, None)
+            value_str = str(value) if value is not None else 'None'
+            original_values[value_str] = value
+        
+        logger.info(f"Found {len(value_counts)} distinct values for {field_name} in {model_name}")
+        logger.info(f"Values: {value_counts}")
+        
+        return {
+            'counts': value_counts,
+            'values': original_values
+        }
+        
+    except Exception as e:
+        error_details = traceback.format_exc()
+        logger.error(f"Error querying distinct values: {e}\n{error_details}")
+        return {'counts': {}, 'values': {}}
 
 def get_timesheet_entries(models, uid, odoo_db, odoo_password, start_date, end_date=None):
     """Get timesheet entries for a date range"""
@@ -685,28 +909,15 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
         planning_slots = get_planning_slots(models, uid, odoo_db, odoo_password, reference_date, selected_date, shift_status_filter)
         
         # Post-process to ensure only slots with the correct allocation type are included
-        # Post-process to ensure only slots with the correct status are included
+        # Apply enhanced filtering for shift status
         if shift_status_filter:
-            filtered_slots = []
-            for slot in planning_slots:
-                slot_status = str(slot.get('x_studio_shift_status', '')).lower()
-                shift_lower = shift_status_filter.lower()
+            planning_slots = enhanced_shift_status_filtering(
+                planning_slots, 
+                shift_status_filter,
+                st.session_state.shift_status_values
+            )
+            logger.info(f"Enhanced filtering returned {len(planning_slots)} slots with status matching '{shift_status_filter}'")
                 
-                # Check for various matches
-                is_match = False
-                if slot_status == shift_lower:
-                    is_match = True
-                elif "confirm" in shift_lower and ("confirm" in slot_status or "plan" in slot_status):
-                    is_match = True
-                elif "unconfirm" in shift_lower and ("unconfirm" in slot_status or "forecast" in slot_status):
-                    is_match = True
-                
-                if is_match:
-                    filtered_slots.append(slot)
-                    
-            planning_slots = filtered_slots
-            logger.info(f"Post-filtered to {len(planning_slots)} slots with status matching '{shift_status_filter}'")
-        
         # Step 2: Get all timesheet entries for the date range
         timesheet_entries = get_timesheet_entries(models, uid, odoo_db, odoo_password, reference_date, selected_date)
         
@@ -1826,7 +2037,243 @@ def main():
             if st.session_state.last_error and st.session_state.debug_mode:
                 with st.expander("Error Details", expanded=False):
                     st.code(st.session_state.last_error)
-    
+    if st.session_state.debug_mode:
+        st.markdown("---")
+        st.subheader("🔍 Debugging Tools")
+        
+        debug_tab1, debug_tab2, debug_tab3 = st.tabs(["Shift Status Values", "Planning Slots Query", "Timesheet Matching"])
+        
+        with debug_tab1:
+            st.markdown("### Debug Shift Status Values")
+            st.write("This will extract all possible values for the x_studio_shift_status field")
+            
+            if st.button("Extract Shift Status Values"):
+                if not st.session_state.odoo_uid or not st.session_state.odoo_models:
+                    st.error("Not connected to Odoo. Please connect first.")
+                else:
+                    with st.spinner("Extracting shift status values..."):
+                        debug_shift_status_values(
+                            st.session_state.odoo_models,
+                            st.session_state.odoo_uid,
+                            st.session_state.odoo_db,
+                            st.session_state.odoo_password
+                        )
+            
+            # Display current mapping
+            if st.session_state.shift_status_values:
+                st.write("Current shift status values in memory:")
+                for key, value in st.session_state.shift_status_values.items():
+                    st.write(f"- Key: '{key}', Label: '{value}'")
+            
+            # Option to manually set mapping
+            st.markdown("### Manual Mapping Override")
+            st.write("If automatic mapping isn't working, you can manually define the mappings:")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                confirmed_key = st.text_input("Key for 'Confirmed' status:", 
+                                            key="confirmed_key_override")
+            with col2:
+                forecasted_key = st.text_input("Key for 'Forecasted' status:", 
+                                            key="forecasted_key_override")
+            
+            if st.button("Apply Manual Mapping"):
+                if confirmed_key or forecasted_key:
+                    # Create new mapping dictionary
+                    manual_mapping = {}
+                    if confirmed_key:
+                        manual_mapping[confirmed_key] = "Confirmed"
+                    if forecasted_key:
+                        manual_mapping[forecasted_key] = "Forecasted"
+                    
+                    # Update session state
+                    st.session_state.shift_status_values = manual_mapping
+                    st.success("Manual mapping applied!")
+                    
+            # Query actual database values
+            st.markdown("### Query Actual Database Values")
+            if st.button("Query Distinct Shift Status Values"):
+                if not st.session_state.odoo_uid or not st.session_state.odoo_models:
+                    st.error("Not connected to Odoo. Please connect first.")
+                else:
+                    with st.spinner("Querying database..."):
+                        result = query_distinct_field_values(
+                            st.session_state.odoo_models,
+                            st.session_state.odoo_uid,
+                            st.session_state.odoo_db,
+                            st.session_state.odoo_password,
+                            'planning.slot',
+                            'x_studio_shift_status',
+                            5000  # Increased limit to get more comprehensive results
+                        )
+                        
+                        if result['counts']:
+                            st.write("Values found in the database:")
+                            for value, count in sorted(result['counts'].items(), key=lambda x: x[1], reverse=True):
+                                st.write(f"- '{value}': {count} records")
+                            
+                            # Automatically create mappings based on keywords
+                            st.write("Suggested mappings:")
+                            confirmed_key = None
+                            forecasted_key = None
+                            
+                            for value_str in result['counts'].keys():
+                                value_lower = value_str.lower()
+                                if "confirm" in value_lower or "plan" in value_lower:
+                                    confirmed_key = result['values'][value_str]
+                                    st.write(f"- Confirmed/Planned: '{value_str}'")
+                                elif "unconfirm" in value_lower or "forecast" in value_lower:
+                                    forecasted_key = result['values'][value_str]
+                                    st.write(f"- Forecasted/Unconfirmed: '{value_str}'")
+                            
+                            # Option to apply suggested mappings
+                            if confirmed_key is not None or forecasted_key is not None:
+                                if st.button("Apply Suggested Mappings"):
+                                    mapping = {}
+                                    if confirmed_key is not None:
+                                        mapping[confirmed_key] = "Confirmed"
+                                    if forecasted_key is not None:
+                                        mapping[forecasted_key] = "Forecasted"
+                                        
+                                    st.session_state.shift_status_values = mapping
+                                    st.success("Applied suggested mappings!")
+                        else:
+                            st.warning("No values found or error occurred")
+        
+        with debug_tab2:
+            st.markdown("### Debug Planning Slot Query")
+            st.write("Test direct query for planning slots with specific settings")
+            
+            # Date range for test
+            test_start_date = st.date_input("Test Start Date", 
+                                        value=datetime.now().date() - timedelta(days=7),
+                                        key="test_start_date")
+            
+            test_end_date = st.date_input("Test End Date", 
+                                        value=datetime.now().date(),
+                                        key="test_end_date")
+            
+            # Status filter options
+            test_status = st.selectbox("Test Status Filter",
+                                    options=["None"] + list(st.session_state.shift_status_values.values()) 
+                                    if st.session_state.shift_status_values 
+                                    else ["None", "confirmed", "forecasted", "planned", "unconfirmed"],
+                                    key="test_status")
+            
+            if test_status == "None":
+                test_status = None
+            
+            if st.button("Test Planning Slot Query"):
+                if not st.session_state.odoo_uid or not st.session_state.odoo_models:
+                    st.error("Not connected to Odoo. Please connect first.")
+                else:
+                    with st.spinner("Querying planning slots..."):
+                        test_slots = get_planning_slots(
+                            st.session_state.odoo_models,
+                            st.session_state.odoo_uid,
+                            st.session_state.odoo_db,
+                            st.session_state.odoo_password,
+                            test_start_date,
+                            test_end_date,
+                            test_status
+                        )
+                        
+                        st.write(f"Found {len(test_slots)} planning slots")
+                        
+                        # Show sample of the slots
+                        if test_slots:
+                            sample_size = min(5, len(test_slots))
+                            st.write(f"Sample of {sample_size} slots:")
+                            for i in range(sample_size):
+                                st.json(test_slots[i])
+                            
+                            # Count by status
+                            status_counts = {}
+                            for slot in test_slots:
+                                status = slot.get('x_studio_shift_status', 'None')
+                                status_counts[status] = status_counts.get(status, 0) + 1
+                            
+                            st.write("Status distribution:")
+                            for status, count in status_counts.items():
+                                st.write(f"- '{status}': {count} slots")
+        
+        with debug_tab3:
+            st.markdown("### Debug Timesheet Matching")
+            st.write("Test the logic that matches timesheets to planning slots")
+            
+            # Simple test with a specific date
+            test_match_date = st.date_input("Test Date for Matching", 
+                                            value=datetime.now().date() - timedelta(days=1),
+                                            key="test_match_date")
+            
+            if st.button("Test Timesheet Matching"):
+                if not st.session_state.odoo_uid or not st.session_state.odoo_models:
+                    st.error("Not connected to Odoo. Please connect first.")
+                else:
+                    with st.spinner("Testing timesheet matching..."):
+                        # Get planning slots
+                        test_slots = get_planning_slots(
+                            st.session_state.odoo_models,
+                            st.session_state.odoo_uid,
+                            st.session_state.odoo_db,
+                            st.session_state.odoo_password,
+                            test_match_date,
+                            test_match_date,
+                            None  # No status filter
+                        )
+                        
+                        # Get timesheet entries
+                        test_entries = get_timesheet_entries(
+                            st.session_state.odoo_models,
+                            st.session_state.odoo_uid,
+                            st.session_state.odoo_db,
+                            st.session_state.odoo_password,
+                            test_match_date,
+                            test_match_date
+                        )
+                        
+                        st.write(f"Found {len(test_slots)} planning slots and {len(test_entries)} timesheet entries")
+                        
+                        # Display some examples of each
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.markdown("### Sample Planning Slots")
+                            if test_slots:
+                                for i in range(min(3, len(test_slots))):
+                                    with st.expander(f"Slot {i+1}"):
+                                        st.json(test_slots[i])
+                            else:
+                                st.write("No planning slots found")
+                        
+                        with col2:
+                            st.markdown("### Sample Timesheet Entries")
+                            if test_entries:
+                                for i in range(min(3, len(test_entries))):
+                                    with st.expander(f"Entry {i+1}"):
+                                        st.json(test_entries[i])
+                            else:
+                                st.write("No timesheet entries found")
+                        
+                        # Show raw field formats for comparison
+                        st.markdown("### Field Formats Comparison")
+                        
+                        formats = {
+                            "Planning Slot": {
+                                "resource_id": test_slots[0].get("resource_id") if test_slots else None,
+                                "task_id": test_slots[0].get("task_id") if test_slots else None,
+                                "project_id": test_slots[0].get("project_id") if test_slots else None,
+                                "x_studio_shift_status": test_slots[0].get("x_studio_shift_status") if test_slots else None
+                            },
+                            "Timesheet Entry": {
+                                "employee_id": test_entries[0].get("employee_id") if test_entries else None,
+                                "task_id": test_entries[0].get("task_id") if test_entries else None,
+                                "project_id": test_entries[0].get("project_id") if test_entries else None,
+                                "user_id": test_entries[0].get("user_id") if test_entries else None
+                            }
+                        }
+                        
+                        st.json(formats)
     # Add a section for scheduled reports
     st.subheader("Schedule Daily Reports")
     st.info("""
