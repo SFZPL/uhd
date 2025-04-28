@@ -909,7 +909,6 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
         # Step 1: Get all planning slots for the date range (reference_date to selected_date) with optional allocation filter
         planning_slots = get_planning_slots(models, uid, odoo_db, odoo_password, reference_date, selected_date, shift_status_filter)
         
-        # Post-process to ensure only slots with the correct allocation type are included
         # Apply enhanced filtering for shift status
         if shift_status_filter:
             planning_slots = enhanced_shift_status_filtering(
@@ -1031,6 +1030,7 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
         designer_name_only_to_timesheet = {}
         for entry in timesheet_entries:
             employee_name = None
+            entry_date = entry.get('date', None)
             
             # Get employee name
             if 'employee_id' in entry and entry['employee_id'] and isinstance(entry['employee_id'], list) and len(entry['employee_id']) > 1:
@@ -1111,6 +1111,22 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
             has_timesheet = False
             hours_logged = 0.0
             
+            # Extract task date from slot data
+            task_date = None
+            if slot.get('start_datetime') and isinstance(slot.get('start_datetime'), str):
+                try:
+                    # Convert string to datetime
+                    task_date = datetime.strptime(slot.get('start_datetime'), "%Y-%m-%d %H:%M:%S").date()
+                except:
+                    # If parsing fails, use the selected date
+                    task_date = selected_date
+            else:
+                # Fallback if no valid start_datetime
+                task_date = selected_date
+            
+            # Format the task date as a string for comparison with timesheet dates
+            task_date_str = task_date.strftime("%Y-%m-%d")
+            
             # First check: exact match by resource_id + task_id + project_id
             key = (resource_id, task_id, project_id)
             if key in resource_task_to_timesheet:
@@ -1128,20 +1144,45 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                 # Only consider it a valid timesheet if hours logged are greater than 0
                 # AND the entry was created by the designer (their user_id is in the user_ids set)
                 user_ids = resource_task_to_timesheet[key]['user_ids']
-                has_timesheet = (hours_logged > 0) and (resource_user_id in user_ids if resource_user_id else False)
+                
+                # Check if any of the timesheet entries match the specific date
+                matching_entries = [
+                    entry for entry in resource_task_to_timesheet[key]['entries']
+                    if entry.get('date') == task_date_str
+                ]
+                
+                if matching_entries:
+                    # Calculate hours for just the matching date
+                    date_specific_hours = sum(entry.get('unit_amount', 0) for entry in matching_entries)
+                    has_timesheet = (date_specific_hours > 0) and (resource_user_id in user_ids if resource_user_id else False)
             
             # Second check: try matching by name + task_id + project_id
             if not has_timesheet and resource_name != "Unknown":
                 name_key = (resource_name, task_id, project_id)
                 if name_key in designer_name_to_timesheet:
-                    hours_logged = designer_name_to_timesheet[name_key]['hours']
-                    has_timesheet = hours_logged > 0
+                    # Check if any of the timesheet entries match the specific date
+                    matching_entries = [
+                        entry for entry in designer_name_to_timesheet[name_key]['entries']
+                        if entry.get('date') == task_date_str
+                    ]
+                    
+                    if matching_entries:
+                        # Calculate hours for just the matching date
+                        date_specific_hours = sum(entry.get('unit_amount', 0) for entry in matching_entries)
+                        has_timesheet = date_specific_hours > 0
             
-            # Last resort: check if designer has ANY timesheet for the day
-            if not has_timesheet and resource_name != "Unknown":
-                if resource_name in designer_name_only_to_timesheet:
-                    hours_logged = designer_name_only_to_timesheet[resource_name]['hours']
-                    has_timesheet = hours_logged > 0
+            # Last resort: check if designer has ANY timesheet for THIS SPECIFIC DAY
+            if not has_timesheet and resource_name != "Unknown" and resource_name in designer_name_only_to_timesheet:
+                # Filter entries to only include those for the specific task date
+                matching_entries = [
+                    entry for entry in designer_name_only_to_timesheet[resource_name]['entries']
+                    if entry.get('date') == task_date_str
+                ]
+                
+                if matching_entries:
+                    # Calculate hours for just the matching date
+                    date_specific_hours = sum(entry.get('unit_amount', 0) for entry in matching_entries)
+                    has_timesheet = date_specific_hours > 0
             
             # Get other slot info for display
             slot_name = slot.get('name', 'Unnamed Slot')
@@ -1184,19 +1225,6 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
             
             # Get time allocation
             allocated_hours = slot.get('allocated_hours', 0.0)
-            
-            # Extract task date from slot data
-            task_date = None
-            if start_datetime and isinstance(start_datetime, str):
-                try:
-                    # Convert string to datetime
-                    task_date = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M:%S").date()
-                except:
-                    # If parsing fails, use the selected date
-                    task_date = selected_date
-            else:
-                # Fallback if no valid start_datetime
-                task_date = selected_date
                 
             # Calculate days since task date for urgency
             reference_point = selected_date
@@ -1216,7 +1244,7 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     'Start Time': str(start_time),
                     'End Time': str(end_time),
                     'Allocated Hours': float(allocated_hours),
-                    'Shift Status': str(slot.get('x_studio_shift_status', 'Unknown')),
+                    'Shift Status': str(slot.get('x_studio_shift_status', 'Unknown')),  # Use actual status from slot
                     'Days Overdue': int(days_since_task),
                     'Urgency': 'High' if days_since_task >= 2 else ('Medium' if days_since_task == 1 else 'Low')
                 }
@@ -1247,18 +1275,40 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                 # First check: exact match by resource_id + task_id + project_id
                 (slot.get('resource_id') and slot.get('task_id') and slot.get('project_id') and 
                 (slot['resource_id'][0], slot['task_id'][0], slot['project_id'][0]) in resource_task_to_timesheet and
-                resource_task_to_timesheet[(slot['resource_id'][0], slot['task_id'][0], slot['project_id'][0])]['hours'] > 0) or
+                # Filter by date
+                any(entry.get('date') == datetime.strptime(slot.get('start_datetime', ''), "%Y-%m-%d %H:%M:%S").date().strftime("%Y-%m-%d") 
+                    for entry in resource_task_to_timesheet[(slot['resource_id'][0], slot['task_id'][0], slot['project_id'][0])]['entries']
+                    if slot.get('start_datetime') and entry.get('date')) and
+                # Check hours
+                sum(entry.get('unit_amount', 0) 
+                    for entry in resource_task_to_timesheet[(slot['resource_id'][0], slot['task_id'][0], slot['project_id'][0])]['entries']
+                    if slot.get('start_datetime') and entry.get('date') == datetime.strptime(slot.get('start_datetime', ''), "%Y-%m-%d %H:%M:%S").date().strftime("%Y-%m-%d")) > 0) or
                 
                 # Second check: try matching by name + task_id + project_id
                 (slot.get('resource_id') and slot.get('task_id') and slot.get('project_id') and
                 len(slot['resource_id']) > 1 and
                 (slot['resource_id'][1], slot['task_id'][0], slot['project_id'][0]) in designer_name_to_timesheet and
-                designer_name_to_timesheet[(slot['resource_id'][1], slot['task_id'][0], slot['project_id'][0])]['hours'] > 0) or
+                # Filter by date
+                any(entry.get('date') == datetime.strptime(slot.get('start_datetime', ''), "%Y-%m-%d %H:%M:%S").date().strftime("%Y-%m-%d") 
+                    for entry in designer_name_to_timesheet[(slot['resource_id'][1], slot['task_id'][0], slot['project_id'][0])]['entries']
+                    if slot.get('start_datetime') and entry.get('date')) and
+                # Check hours
+                sum(entry.get('unit_amount', 0) 
+                    for entry in designer_name_to_timesheet[(slot['resource_id'][1], slot['task_id'][0], slot['project_id'][0])]['entries']
+                    if slot.get('start_datetime') and entry.get('date') == datetime.strptime(slot.get('start_datetime', ''), "%Y-%m-%d %H:%M:%S").date().strftime("%Y-%m-%d")) > 0) or
                 
-                # Last resort: check if designer has ANY timesheet for the day
-                (slot.get('resource_id') and len(slot['resource_id']) > 1 and
-                slot['resource_id'][1] in designer_name_only_to_timesheet and
-                designer_name_only_to_timesheet[slot['resource_id'][1]]['hours'] > 0)
+                # Last resort: check if designer has ANY timesheet for THE SPECIFIC DAY
+                (slot.get('resource_id') and slot.get('start_datetime') and 
+                 len(slot['resource_id']) > 1 and
+                 slot['resource_id'][1] in designer_name_only_to_timesheet and
+                 # Check if any timesheet entries match the specific day
+                 any(entry.get('date') == datetime.strptime(slot['start_datetime'], "%Y-%m-%d %H:%M:%S").date().strftime("%Y-%m-%d")
+                     for entry in designer_name_only_to_timesheet[slot['resource_id'][1]]['entries']
+                     if entry.get('date')) and
+                 # Verify hours are logged for that date
+                 sum(entry.get('unit_amount', 0)
+                     for entry in designer_name_only_to_timesheet[slot['resource_id'][1]]['entries']
+                     if entry.get('date') == datetime.strptime(slot['start_datetime'], "%Y-%m-%d %H:%M:%S").date().strftime("%Y-%m-%d")) > 0)
             )])
             
             # Send email report if requested
