@@ -1137,7 +1137,7 @@ def send_teams_webhook_notification(
         webhook_url: str,
         tasks: list,
         report_date: date
-):
+    ):
     """
     Post a short adaptive-card–compatible message to Teams.
     """
