@@ -45,8 +45,8 @@ if 'debug_mode' not in st.session_state:
     st.session_state.debug_mode = False
 if 'confirmed_only' not in st.session_state:
     st.session_state.confirmed_only = True  # Default to showing only confirmed tasks
-if 'allocation_filter' not in st.session_state:
-    st.session_state.allocation_filter = "planning"  # Default to Planning (confirmed)
+if 'shift_status_filter' not in st.session_state:
+    st.session_state.shift_status_filter = "Planned"  # Default to Planned (confirmed)
 if 'model_fields_cache' not in st.session_state:
     st.session_state.model_fields_cache = {}
 if 'last_error' not in st.session_state:
@@ -146,10 +146,10 @@ def get_model_fields(models, uid, odoo_db, odoo_password, model_name):
         st.session_state.last_error = error_details
         return {}
 
-def get_planning_slots(models, uid, odoo_db, odoo_password, start_date, end_date=None, allocation_filter=None):
+def get_planning_slots(models, uid, odoo_db, odoo_password, start_date, end_date=None, shift_status_filter=None):
     """
     Get planning slots for a date range, with a focus on finding all slots 
-    that overlap with the given date range. Optionally filter by allocation_type.
+    that overlap with the given date range. Optionally filter by x_studio_shift_status.
     """
     try:
         # Get the fields for planning.slot model
@@ -184,14 +184,14 @@ def get_planning_slots(models, uid, odoo_db, odoo_password, start_date, end_date
             [('start_datetime', '>=', start_date_str), ('start_datetime', '<', next_date_str)]
         ]
         
-        # Add allocation_type filter if provided
+        # Add shift_status filter if provided
         domains = []
-        if allocation_filter and 'allocation_type' in available_fields:
-            logger.info(f"Filtering planning slots by allocation_type: {allocation_filter}")
+        if shift_status_filter and 'x_studio_shift_status' in available_fields:
+            logger.info(f"Filtering planning slots by x_studio_shift_status: {shift_status_filter}")
             for base_domain in base_domains:
                 if base_domain:  # Skip empty domain
                     domain_with_filter = base_domain.copy()
-                    domain_with_filter.append(('allocation_type', '=', allocation_filter))
+                    domain_with_filter.append(('x_studio_shift_status', '=', shift_status_filter))
                     domains.append(domain_with_filter)
         else:
             domains = base_domains
@@ -199,7 +199,7 @@ def get_planning_slots(models, uid, odoo_db, odoo_password, start_date, end_date
         # Basic fields we want, checking which ones exist
         desired_fields = [
             'id', 'name', 'resource_id', 'start_datetime', 'end_datetime', 
-            'allocated_hours', 'state', 'project_id', 'task_id', 'allocation_type',
+            'allocated_hours', 'state', 'project_id', 'task_id', 'x_studio_shift_status',
             'create_uid', 'x_studio_sub_task_1', 'x_studio_task_activity', 'x_studio_service_category_1'
         ]
         
@@ -243,9 +243,9 @@ def get_planning_slots(models, uid, odoo_db, odoo_password, start_date, end_date
                 one_month_ago = (start_date - timedelta(days=30)).strftime("%Y-%m-%d")
                 base_domain = [('start_datetime', '>=', one_month_ago)]
                         
-                # Add allocation_type filter if provided
-                if allocation_filter and 'allocation_type' in available_fields:
-                    base_domain.append(('allocation_type', '=', allocation_filter))
+                # Add shift_status filter if provided
+                if shift_status_filter and 'x_studio_shift_status' in available_fields:
+                    base_domain.append(('x_studio_shift_status', '=', shift_status_filter))
                 
                 recent_slots = models.execute_kw(
                     odoo_db, uid, odoo_password,
@@ -384,7 +384,7 @@ def get_references_data(models, uid, odoo_db, odoo_password):
         st.session_state.last_error = error_details
         return reference_data
 
-def send_email_report(df, selected_date, missing_count, timesheet_count, allocation_filter=None, reference_date=None):
+def send_email_report(df, selected_date, missing_count, timesheet_count, shift_status_filter=None, reference_date=None):
     """Send email with report attached as CSV and summary in the body"""
     try:
         if not st.session_state.email_enabled:
@@ -410,8 +410,8 @@ def send_email_report(df, selected_date, missing_count, timesheet_count, allocat
         
         # Prepare filter info for email body
         filter_text = ""
-        if allocation_filter:
-            filter_text = f" with allocation type '{allocation_filter}'"
+        if shift_status_filter:
+            filter_text = f" with shift status '{shift_status_filter}'"
             
         # Create email body text
         body = f"""
@@ -513,7 +513,7 @@ def send_designer_email(
         if one_day:
             subj = "Quick Nudge – Log Your Hours"
         else:  # two_plus
-            subj = "Heads-Up: You’ve Missed Logging Hours for 2 Days"
+            subj = "Heads-Up: You've Missed Logging Hours for 2 Days"
 
         # -- e-mail boilerplate ----------------------------------------------
         msg            = MIMEMultipart()
@@ -556,8 +556,8 @@ def send_designer_email(
             <p>We completely understand things can get busy — but consistent
             time logging helps us improve project planning and smooth
             reporting.</p>
-            <p>If something’s holding you back from logging your hours,
-            just reach out. We’re here to help.</p>
+            <p>If something's holding you back from logging your hours,
+            just reach out. We're here to help.</p>
         """)
 
         body = f"""
@@ -604,7 +604,7 @@ def send_designer_email(
         return False
 
 
-def generate_missing_timesheet_report(selected_date, allocation_filter=None, send_email=False, send_designer_emails=False):
+def generate_missing_timesheet_report(selected_date, shift_status_filter=None, send_email=False, send_designer_emails=False):
     """
     Generate report of planning slots without timesheet entries for a date range from reference_date to selected_date
     """
@@ -619,19 +619,19 @@ def generate_missing_timesheet_report(selected_date, allocation_filter=None, sen
         return pd.DataFrame(), 0, 0
     
     try:
-        # Step 1: Get all planning slots for the date range (reference_date to selected_date) with optional allocation filter
-        planning_slots = get_planning_slots(models, uid, odoo_db, odoo_password, reference_date, selected_date, allocation_filter)
+        # Step 1: Get all planning slots for the date range (reference_date to selected_date) with optional shift status filter
+        planning_slots = get_planning_slots(models, uid, odoo_db, odoo_password, reference_date, selected_date, shift_status_filter)
         
-        # Post-process to ensure only slots with the correct allocation type are included
+        # Post-process to ensure only slots with the correct shift status are included
         # This adds a second layer of filtering in case the Odoo query didn't filter properly
-        if allocation_filter:
+        if shift_status_filter:
             filtered_slots = []
             for slot in planning_slots:
-                slot_allocation = slot.get('allocation_type', '').lower()
-                if slot_allocation == allocation_filter.lower():
+                slot_shift_status = slot.get('x_studio_shift_status', '')
+                if slot_shift_status == shift_status_filter:
                     filtered_slots.append(slot)
             planning_slots = filtered_slots
-            logger.info(f"Post-filtered to {len(planning_slots)} slots with allocation_type={allocation_filter}")
+            logger.info(f"Post-filtered to {len(planning_slots)} slots with x_studio_shift_status={shift_status_filter}")
         
         # Step 2: Get all timesheet entries for the date range
         timesheet_entries = get_timesheet_entries(models, uid, odoo_db, odoo_password, reference_date, selected_date)
@@ -864,8 +864,8 @@ def generate_missing_timesheet_report(selected_date, allocation_filter=None, sen
             if isinstance(slot_name, bool):
                 slot_name = str(slot_name)
             
-            # Get allocation type for display
-            allocation_type = slot.get('allocation_type', 'Unknown')
+            # Get shift status for display
+            shift_status = slot.get('x_studio_shift_status', 'Unknown')
             
             # Get client success member (create_uid)
             client_success_name = "Unknown"
@@ -931,7 +931,7 @@ def generate_missing_timesheet_report(selected_date, allocation_filter=None, sen
                     'Start Time': str(start_time),
                     'End Time': str(end_time),
                     'Allocated Hours': float(allocated_hours),
-                    'Allocation Type': str(allocation_type),
+                    'Shift Status': str(shift_status),
                     'Days Overdue': int(days_since_task),
                     'Urgency': 'High' if days_since_task >= 2 else ('Medium' if days_since_task == 1 else 'Low')
                 }
@@ -978,7 +978,7 @@ def generate_missing_timesheet_report(selected_date, allocation_filter=None, sen
             
             # Send email report if requested
             if send_email and (missing_count > 0 or st.session_state.debug_mode):
-                email_sent = send_email_report(df, selected_date, missing_count, len(timesheet_entries), allocation_filter, reference_date)
+                email_sent = send_email_report(df, selected_date, missing_count, len(timesheet_entries), shift_status_filter, reference_date)
                 if email_sent:
                     st.success(f"Email report sent to {st.session_state.email_recipient}")
                 else:
@@ -1107,12 +1107,12 @@ def generate_missing_timesheet_report(selected_date, allocation_filter=None, sen
             # Return empty DataFrame with columns
             empty_df = pd.DataFrame(columns=[
                 'Date', 'Designer', 'Project', 'Client Success Member', 'Task', 'Slot Name', 
-                'Start Time', 'End Time', 'Allocated Hours', 'Allocation Type', 'Days Overdue', 'Urgency'
+                'Start Time', 'End Time', 'Allocated Hours', 'Shift Status', 'Days Overdue', 'Urgency'
             ])
             
             # Send email for empty report if requested
             if send_email:
-                email_sent = send_email_report(empty_df, selected_date, 0, len(timesheet_entries), allocation_filter, reference_date)
+                email_sent = send_email_report(empty_df, selected_date, 0, len(timesheet_entries), shift_status_filter, reference_date)
                 if email_sent:
                     st.success(f"Email report sent to {st.session_state.email_recipient}")
                 else:
@@ -1146,7 +1146,7 @@ def send_teams_webhook_notification(
             intro = ("This is a gentle reminder to log your hours for the "
                      "task below — it only takes a minute:")
         else:
-            title = "Heads-Up: You’ve Missed Logging Hours for 2 Days"
+            title = "Heads-Up: You've Missed Logging Hours for 2 Days"
             emoji = "🔴"
             intro = ("It looks like no hours have been logged for the past "
                      "two days for the task(s) below:")
@@ -1164,7 +1164,7 @@ def send_teams_webhook_notification(
 
         card_text = (f"{emoji} **{title}**\n\n"
                      f"{intro}\n\n{bullets}\n\n"
-                     "If something’s blocking you, let us know – we’re here "
+                     "If something's blocking you, let us know – we're here "
                      "to help!")
 
         # basic card
@@ -1196,22 +1196,22 @@ def main():
         st.session_state.debug_mode = st.checkbox("Debug Mode", st.session_state.debug_mode, 
                                                  help="Show all planning slots, not just those missing timesheets")
         
-        # Confirmation status filter
-        st.subheader("Allocation Type Filter")
-        allocation_filter = st.radio(
-            "Show slots with allocation type:",
-            ["All", "Planning (Confirmed)", "Forecast (Unconfirmed)"],
-            index=1,  # Default to "Planning (Confirmed)"
-            help="Filter planning slots by their allocation type"
+        # Shift Status filter
+        st.subheader("Shift Status Filter")
+        shift_status_filter = st.radio(
+            "Show slots with shift status:",
+            ["All", "Planned (Confirmed)", "Forecasted (Unconfirmed)"],
+            index=1,  # Default to "Planned (Confirmed)"
+            help="Filter planning slots by their shift status"
         )
 
-        # Update the allocation filter value based on selection
-        if allocation_filter == "All":
-            st.session_state.allocation_filter = None
-        elif allocation_filter == "Planning (Confirmed)":
-            st.session_state.allocation_filter = "planning"
-        elif allocation_filter == "Forecast (Unconfirmed)":
-            st.session_state.allocation_filter = "forecast"
+        # Update the shift status filter value based on selection
+        if shift_status_filter == "All":
+            st.session_state.shift_status_filter = None
+        elif shift_status_filter == "Planned (Confirmed)":
+            st.session_state.shift_status_filter = "Planned"
+        elif shift_status_filter == "Forecasted (Unconfirmed)":
+            st.session_state.shift_status_filter = "Forecasted"
         
         # Reference date setting for filtering historical tasks
         st.subheader("Reference Date")
@@ -1563,16 +1563,16 @@ def main():
         if not st.session_state.odoo_uid or not st.session_state.odoo_models:
             st.error("Not connected to Odoo. Please connect first.")
         else:
-            # Display allocation type filter info
-            if st.session_state.allocation_filter:
-                allocation_label = "Planning (Confirmed)" if st.session_state.allocation_filter.lower() == "planning" else "Forecast (Unconfirmed)"
-                st.info(f"Filtering for {allocation_label} planning slots")
+            # Display shift status filter info
+            if st.session_state.shift_status_filter:
+                shift_label = "Planned (Confirmed)" if st.session_state.shift_status_filter == "Planned" else "Forecasted (Unconfirmed)"
+                st.info(f"Filtering for {shift_label} planning slots")
             
             with st.spinner("Generating timesheet report..."):
                 # Generate the report
                 df, missing_count, timesheet_count = generate_missing_timesheet_report(
                     selected_date, 
-                    st.session_state.allocation_filter,
+                    st.session_state.shift_status_filter,
                     send_email_report
                 )
                 
@@ -1584,8 +1584,8 @@ def main():
                     
                 if missing_count > 0:
                     filter_text = ""
-                    if st.session_state.allocation_filter:
-                        filter_text = f" with allocation type '{st.session_state.allocation_filter}'"
+                    if st.session_state.shift_status_filter:
+                        filter_text = f" with shift status '{st.session_state.shift_status_filter}'"
                     
                     st.warning(f"Found {missing_count} planning slots{filter_text} without timesheet entries from {st.session_state.reference_date.strftime('%Y-%m-%d')} to {selected_date.strftime('%Y-%m-%d')}")
                     
@@ -1658,13 +1658,13 @@ def main():
                         st.download_button(
                             label="Download CSV",
                             data=csv,
-                            file_name=f"planning_timesheet_report_{reference_date.strftime('%Y-%m-%d')}_to_{selected_date.strftime('%Y-%m-%d')}.csv",
+                            file_name=f"planning_timesheet_report_{st.session_state.reference_date.strftime('%Y-%m-%d')}_to_{selected_date.strftime('%Y-%m-%d')}.csv",
                             mime="text/csv"
                         )
                 else:
                     filter_text = ""
-                    if st.session_state.allocation_filter:
-                        filter_text = f" (allocation type: '{st.session_state.allocation_filter}')"
+                    if st.session_state.shift_status_filter:
+                        filter_text = f" (shift status: '{st.session_state.shift_status_filter}')"
                         
                     st.success(f"All planning slots{filter_text} have corresponding timesheet entries!")
                     
@@ -1703,14 +1703,14 @@ if __name__ == "__main__":
         parser.add_argument("--headless", action="store_true", help="Run in headless mode")
         parser.add_argument("--date", default="today", help="Date for report (YYYY-MM-DD or 'today')")
         parser.add_argument("--email", action="store_true", help="Send email report")
-        parser.add_argument("--allocation", default="forecast", help="Allocation filter (forecast, planning, or all)")
+        parser.add_argument("--shift-status", default="planned", help="Shift status filter (planned, forecasted, or all)")
         parser.add_argument("--designer-emails", action="store_true", help="Send individual emails to designers")
         
         # Need to filter out Streamlit's own arguments
         streamlit_args = []
         our_args = []
         for arg in sys.argv[1:]:
-            if arg.startswith("--headless") or arg.startswith("--date") or arg.startswith("--email") or arg.startswith("--allocation"):
+            if arg.startswith("--headless") or arg.startswith("--date") or arg.startswith("--email") or arg.startswith("--shift-status"):
                 our_args.append(arg)
             else:
                 streamlit_args.append(arg)
@@ -1727,13 +1727,13 @@ if __name__ == "__main__":
                 logger.error(f"Invalid date format: {args.date}. Using today's date.")
                 report_date = datetime.now().date()
         
-        # Set allocation filter
-        if args.allocation.lower() == "all":
-            allocation_filter = None
-        elif args.allocation.lower() == "forecast":
-            allocation_filter = "forecast"
+        # Set shift status filter
+        if args.shift_status.lower() == "all":
+            shift_status_filter = None
+        elif args.shift_status.lower() == "forecasted":
+            shift_status_filter = "Forecasted"
         else:
-            allocation_filter = "planning"  # Default
+            shift_status_filter = "Planned"  # Default
         
         logger.info(f"Running in headless mode for date {report_date}")
         
@@ -1752,7 +1752,7 @@ if __name__ == "__main__":
             # Generate report and send email
             df, missing_count, timesheet_count = generate_missing_timesheet_report(
                 report_date, 
-                allocation_filter,
+                shift_status_filter,
                 args.email  # Send email if --email flag is provided
             )
             
