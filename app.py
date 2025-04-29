@@ -360,7 +360,6 @@ def render_teams_direct_messaging_ui():
                 with st.spinner("Sending test message..."):
                     # Show debug info
                     st.write(f"Using user ID: {teams_id}")
-                    st.write(f"Test task data: {test_task}")
                     
                     # Create a basic test message content
                     simple_message = f"""
@@ -369,21 +368,58 @@ def render_teams_direct_messaging_ui():
                     <p>This is a test message from the Missing Timesheet Reporter.</p>
                     """
                     
-                    # Try direct message with simple content first
-                    st.write("Attempting to send a simple message...")
+                    # First try the standard method
+                    st.write("Attempting to create chat with standard method...")
+                    chat_id = st.session_state.teams_client.create_chat(teams_id)
                     
-                    # First try the simple message
-                    success = send_teams_direct_message(
-                        test_designer,
-                        teams_id,
-                        test_task,  # Make sure this is being passed
-                        st.session_state.teams_client
-                    )
+                    # If that fails, try the alternative method
+                    if not chat_id:
+                        st.write("Standard method failed, trying alternative method...")
+                        chat_id = st.session_state.teams_client.create_direct_chat_alternative(teams_id)
                     
-                    if success:
-                        st.success(f"Test message sent to {test_designer}")
+                    if not chat_id:
+                        st.error("Failed to create chat with both methods")
+                        # Get tenant info to help debug
+                        try:
+                            headers = {
+                                "Authorization": f"Bearer {st.session_state.teams_client.access_token}",
+                                "Content-Type": "application/json"
+                            }
+                            tenant_response = requests.get(
+                                "https://graph.microsoft.com/v1.0/organization",
+                                headers=headers
+                            )
+                            st.write(f"App tenant info status: {tenant_response.status_code}")
+                            if tenant_response.status_code == 200:
+                                tenant_info = tenant_response.json()
+                                if 'value' in tenant_info and len(tenant_info['value']) > 0:
+                                    st.write(f"App tenant ID: {tenant_info['value'][0].get('id')}")
+                        except Exception as e:
+                            st.error(f"Error getting tenant info: {str(e)}")
                     else:
-                        st.error("Failed to send test message. Check logs for details.")
+                        st.write(f"✅ Chat created with ID: {chat_id[:10]}..." if chat_id and len(chat_id) > 10 else chat_id)
+                        
+                        # Now try to send a message
+                        message_sent = st.session_state.teams_client.send_direct_message(
+                            chat_id, 
+                            simple_message
+                        )
+                        
+                        if message_sent:
+                            st.success(f"Test message sent to {test_designer}")
+                        else:
+                            st.error("Failed to send message to chat")
+                            
+                            # Try full message anyway in case simple message was too simple
+                            success = send_teams_direct_message(
+                                test_designer,
+                                teams_id,
+                                test_task,
+                                st.session_state.teams_client
+                            )
+                            
+                            if success:
+                                st.success(f"Full test message sent to {test_designer}")
 def send_teams_direct_message(
         designer_name: str,
         designer_teams_id: str,

@@ -171,7 +171,58 @@ class TeamsDirectMessaging:
             logger.error(f"Error creating chat: {e}")
             logger.error(traceback.format_exc())
             return None
-    
+    def create_direct_chat_alternative(self, user_id):
+        """Try an alternative chat creation method"""
+        if not self.access_token:
+            if not self.authenticate():
+                logger.error("Authentication failed before create_direct_chat_alternative")
+                return None
+        
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Try creating a direct message with simpler payload
+        chat_data = {
+            "chatType": "oneOnOne",
+            "members": [
+                {
+                    "@odata.type": "#microsoft.graph.aadUserConversationMember",
+                    "roles": ["owner"],
+                    "user@odata.bind": f"https://graph.microsoft.com/v1.0/users/{user_id}"
+                }
+            ]
+        }
+        
+        try:
+            url = "https://graph.microsoft.com/v1.0/chats"
+            logger.info(f"Making POST request to alternative endpoint: {url}")
+            logger.info(f"Alternative request payload: {json.dumps(chat_data)}")
+            
+            response = requests.post(
+                url,
+                headers=headers,
+                json=chat_data
+            )
+            
+            # Log status code and partial response
+            logger.info(f"Alternative response status: {response.status_code}")
+            if response.status_code != 201 and response.status_code != 200:
+                logger.error(f"Alternative response text: {response.text[:200]}...")
+            
+            if response.status_code in [200, 201]:
+                chat_info = response.json()
+                chat_id = chat_info.get("id")
+                logger.info(f"Created/found chat with alternative method ID: {chat_id}")
+                return chat_id
+            else:
+                logger.error(f"Alternative method failed to create chat. Status: {response.status_code}")
+                return None
+        except Exception as e:
+            logger.error(f"Error in alternative chat creation: {e}")
+            logger.error(traceback.format_exc())
+            return None
     def send_direct_message(self, chat_id, message_content):
         """Send a message to a Teams chat"""
         if not self.access_token:
