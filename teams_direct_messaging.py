@@ -23,12 +23,12 @@ if not SECOND_MEMBER_ID:
 class TeamsDirectMessaging:
     """Class to handle Microsoft Teams direct messaging via Graph API"""
     
-    def __init__(self, client_id, client_secret, tenant_id):
+    def __init__(self, client_id, client_secret, tenant_id, access_token=None):
         """Initialize with Azure AD credentials"""
         self.client_id = client_id
         self.client_secret = client_secret
         self.tenant_id = tenant_id
-        self.access_token = None
+        self.access_token = access_token
         
         # Log initialization (mask sensitive parts)
         client_id_masked = client_id[:5] + "..." + client_id[-5:] if client_id else "None"
@@ -49,31 +49,12 @@ class TeamsDirectMessaging:
             self.app = None
     
     def authenticate(self):
-        """Authenticate with Microsoft Graph API using client credentials flow"""
-        try:
-            if not self.app:
-                logger.error("Cannot authenticate - MSAL application not initialized")
-                return False
-                
-            logger.info("Requesting token with scope: https://graph.microsoft.com/.default")
-            
-            # Acquire token for application
-            result = self.app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
-            
-            if "access_token" in result:
-                self.access_token = result["access_token"]
-                token_preview = self.access_token[:10] + "..." + self.access_token[-10:] if self.access_token else "None"
-                logger.info(f"Successfully acquired token: {token_preview}")
-                return True
-            else:
-                error = result.get('error', 'Unknown error')
-                description = result.get('error_description', 'No description')
-                logger.error(f"Authentication error: {error}: {description}")
-                return False
-        except Exception as e:
-            logger.error(f"Error during authentication: {e}")
-            logger.error(traceback.format_exc())
-            return False
+        """
+        For delegated mode we’ve already injected self.access_token
+        from app.py → nothing to do. We keep the method so the
+        rest of the code can still call .authenticate().
+        """
+        return bool(self.access_token)
     
     def get_user_id_by_email(self, email):
         """Get Teams user ID from email address"""
@@ -89,7 +70,10 @@ class TeamsDirectMessaging:
         }
         
         try:
-            url = f"https://graph.microsoft.com/v1.0/users/{email}"
+            url = (
+                "https://graph.microsoft.com/v1.0/users"
+                f"?$filter=mail eq '{email}' or userPrincipalName eq '{email}'"
+            )
             logger.info(f"Making request to: {url}")
             
             response = requests.get(url, headers=headers)
@@ -133,13 +117,13 @@ class TeamsDirectMessaging:
             "members": [
                 {
                 "@odata.type": "#microsoft.graph.aadUserConversationMember",
-                "roles": ["owner"],
+                "roles": ["member"],
                 "user@odata.bind":
                 f"https://graph.microsoft.com/v1.0/users('{primary_user_id}')"
                 },
                 {
                 "@odata.type": "#microsoft.graph.aadUserConversationMember",
-                "roles": ["owner"],
+                "roles": ["member"],
                 "user@odata.bind":
                 f"https://graph.microsoft.com/v1.0/users('{SECOND_MEMBER_ID}')"
                 }
@@ -182,7 +166,7 @@ class TeamsDirectMessaging:
             "members": [
                 {
                     "@odata.type": "#microsoft.graph.aadUserConversationMember",
-                    "roles": ["owner"],
+                    "roles": ["member"],
                     "user@odata.bind": f"https://graph.microsoft.com/v1.0/users/{user_id}"
                 }
             ]
@@ -329,7 +313,7 @@ class TeamsDirectMessaging:
             "members": [
                 {
                     "@odata.type": "#microsoft.graph.aadUserConversationMember",
-                    "roles": ["owner"],
+                    "roles": ["member"],
                     "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{user_id}')"
                 }
             ]
@@ -343,7 +327,7 @@ class TeamsDirectMessaging:
             "members": [
                 {
                     "@odata.type": "#microsoft.graph.aadUserConversationMember",
-                    "roles": ["owner"],
+                    "roles": ["member"],
                     "user@odata.bind": f"https://graph.microsoft.com/v1.0/users/{user_id}"
                 }
             ]

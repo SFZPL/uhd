@@ -15,6 +15,8 @@ import os
 import json
 import msal  # You'll need to pip install msal
 from teams_direct_messaging import TeamsDirectMessaging
+from delegated_token import get_graph_token
+
 
 # Configure logging
 logging.basicConfig(
@@ -130,9 +132,14 @@ if hasattr(st.secrets, "EMAIL"):
         st.session_state.smtp_username = st.secrets.EMAIL.SMTP_USERNAME
     if "SMTP_PASSWORD" in st.secrets.EMAIL and not st.session_state.smtp_password:
         st.session_state.smtp_password = st.secrets.EMAIL.SMTP_PASSWORD
+
 def render_teams_direct_messaging_ui():
     """Render the UI for Teams direct messaging configuration"""
     with st.sidebar.expander("Teams Direct Messaging", expanded=False):
+        # ── Obtain / refresh a delegated Graph token ───────────────────
+        if "graph_token" not in st.session_state:
+            st.session_state.graph_token = get_graph_token()
+
         st.session_state.teams_direct_msg_enabled = st.checkbox(
             "Enable Teams Direct Messages", 
             value=st.session_state.teams_direct_msg_enabled,
@@ -168,9 +175,10 @@ def render_teams_direct_messaging_ui():
             try:
                 # Create Teams client 
                 teams_client = TeamsDirectMessaging(
-                    st.session_state.azure_client_id,
-                    st.session_state.azure_client_secret,
-                    st.session_state.azure_tenant_id
+                        st.session_state.azure_client_id,
+                        st.session_state.azure_client_secret,
+                        st.session_state.azure_tenant_id,
+                        access_token=st.session_state.graph_token      # ← pass delegated token
                 )
                     
                 # Test authentication
@@ -328,7 +336,8 @@ def render_teams_direct_messaging_ui():
                     st.session_state.teams_client = TeamsDirectMessaging(
                         st.session_state.azure_client_id,
                         st.session_state.azure_client_secret,
-                        st.session_state.azure_tenant_id
+                        st.session_state.azure_tenant_id,
+                        access_token=st.session_state.graph_token
                     )
                 
                 with st.spinner("Looking up Teams user ID..."):
@@ -433,7 +442,8 @@ def render_teams_direct_messaging_ui():
                     st.session_state.teams_client = TeamsDirectMessaging(
                         st.session_state.azure_client_id,
                         st.session_state.azure_client_secret,
-                        st.session_state.azure_tenant_id
+                        st.session_state.azure_tenant_id,
+                        access_token=st.session_state.graph_token
                     )
                 
                 # Create test task for message
@@ -626,7 +636,8 @@ def send_designer_teams_direct_messages(designers, selected_date):
         st.session_state.teams_client = TeamsDirectMessaging(
             st.session_state.azure_client_id,
             st.session_state.azure_client_secret,
-            st.session_state.azure_tenant_id
+            st.session_state.azure_tenant_id,
+            access_token=st.session_state.graph_token
         )
     
     # Authenticate with Microsoft Graph API
