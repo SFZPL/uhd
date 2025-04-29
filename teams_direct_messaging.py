@@ -262,3 +262,101 @@ class TeamsDirectMessaging:
             logger.error(f"Error sending message: {e}")
             logger.error(traceback.format_exc())
             return False
+        
+    def debug_api_call(self, method, url, payload=None, max_content_length=500):
+        """Make an API call to Microsoft Graph with detailed debugging"""
+        if not self.access_token:
+            if not self.authenticate():
+                return None, "Authentication failed"
+        
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        try:
+            logger.info(f"DEBUG: Making {method} request to: {url}")
+            if payload:
+                logger.info(f"DEBUG: Request payload: {json.dumps(payload)}")
+                
+            if method.upper() == "GET":
+                response = requests.get(url, headers=headers)
+            elif method.upper() == "POST":
+                response = requests.post(url, headers=headers, json=payload)
+            else:
+                return None, f"Unsupported method: {method}"
+            
+            logger.info(f"DEBUG: Response status: {response.status_code}")
+            logger.info(f"DEBUG: Response headers: {dict(response.headers)}")
+            
+            content = response.text[:max_content_length] + "..." if len(response.text) > max_content_length else response.text
+            logger.info(f"DEBUG: Response content: {content}")
+            
+            if response.status_code >= 400:
+                error_detail = f"Error {response.status_code}: {content}"
+                return None, error_detail
+            
+            try:
+                return response.json(), None
+            except:
+                return response.text, None
+        except Exception as e:
+            error_detail = f"Request failed: {str(e)}"
+            logger.error(error_detail)
+            logger.error(traceback.format_exc())
+            return None, error_detail
+        
+    def test_organization_access(self):
+        """Test if we can access organization information"""
+        result, error = self.debug_api_call("GET", "https://graph.microsoft.com/v1.0/organization")
+        return result, error
+
+    def test_users_access(self):
+        """Test if we can list users"""
+        result, error = self.debug_api_call("GET", "https://graph.microsoft.com/v1.0/users?$top=5")
+        return result, error
+
+    def test_chats_access(self):
+        """Test if we can list chats"""
+        result, error = self.debug_api_call("GET", "https://graph.microsoft.com/v1.0/chats")
+        return result, error
+
+    def test_create_chat_permission(self, user_id):
+        """Test various chat creation approaches"""
+        # Try standard format
+        payload1 = {
+            "chatType": "oneOnOne",
+            "members": [
+                {
+                    "@odata.type": "#microsoft.graph.aadUserConversationMember",
+                    "roles": ["owner"],
+                    "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{user_id}')"
+                }
+            ]
+        }
+        
+        result1, error1 = self.debug_api_call("POST", "https://graph.microsoft.com/v1.0/chats", payload1)
+        
+        # Try alternative format
+        payload2 = {
+            "chatType": "oneOnOne",
+            "members": [
+                {
+                    "@odata.type": "#microsoft.graph.aadUserConversationMember",
+                    "roles": ["owner"],
+                    "user@odata.bind": f"https://graph.microsoft.com/v1.0/users/{user_id}"
+                }
+            ]
+        }
+        
+        result2, error2 = self.debug_api_call("POST", "https://graph.microsoft.com/v1.0/chats", payload2)
+        
+        return {
+            "standard": {"result": result1, "error": error1},
+            "alternative": {"result": result2, "error": error2}
+        }
+
+    def check_user_exists(self, user_id):
+        """Check if a user with the given ID exists"""
+        result, error = self.debug_api_call("GET", f"https://graph.microsoft.com/v1.0/users/{user_id}")
+        return result, error

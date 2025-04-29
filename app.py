@@ -164,7 +164,7 @@ def render_teams_direct_messaging_ui():
             help="Tenant ID of your Azure AD"
         )
         # Add debug button after Azure credentials
-        if st.button("Debug Teams Authentication", key="debug_teams_auth"):
+        if st.button("Run Comprehensive Diagnostics", key="debug_comprehensive"):
             try:
                 # Create Teams client 
                 teams_client = TeamsDirectMessaging(
@@ -173,37 +173,129 @@ def render_teams_direct_messaging_ui():
                     st.session_state.azure_tenant_id
                 )
                     
-                # Print credentials (partially masked)
-                st.write(f"Client ID: {st.session_state.azure_client_id[:5]}...{st.session_state.azure_client_id[-5:]}")
-                st.write(f"Tenant ID: {st.session_state.azure_tenant_id[:5]}...{st.session_state.azure_tenant_id[-5:]}")
-                st.write(f"Secret: {st.session_state.azure_client_secret[:5]}...{st.session_state.azure_client_secret[-5:]}")
-                    
                 # Test authentication
                 with st.spinner("Testing authentication..."):
                     auth_result = teams_client.authenticate()
                     if auth_result:
-                        st.success("Authentication successful!")
-                        # Try to get info about the token
-                        headers = {
-                            "Authorization": f"Bearer {teams_client.access_token}",
-                            "Content-Type": "application/json"
-                        }
+                        st.success("✅ Authentication successful!")
                         
-                        # This will help us understand what permissions the token has
-                        st.code(f"Access token first 20 chars: {teams_client.access_token[:20]}...")
+                        # Analyze token (without JWT library)
+                        token = teams_client.access_token
+                        token_parts = token.split('.')
+                        if len(token_parts) >= 2:
+                            # Base64 decode the payload
+                            import base64
+                            # Fix padding
+                            payload = token_parts[1]
+                            payload += '=' * (4 - len(payload) % 4) if len(payload) % 4 != 0 else ''
+                            
+                            try:
+                                decoded = base64.b64decode(payload)
+                                token_data = json.loads(decoded)
+                                
+                                # Display token data
+                                st.subheader("Token Information")
+                                st.write(f"App ID: {token_data.get('appid')}")
+                                st.write(f"Audience: {token_data.get('aud')}")
+                                st.write(f"Tenant ID: {token_data.get('tid')}")
+                                
+                                # Display roles/scopes
+                                if 'roles' in token_data:
+                                    st.write("Permissions granted:")
+                                    for role in token_data['roles']:
+                                        st.write(f"- {role}")
+                                else:
+                                    st.warning("No roles found in token")
+                                    
+                                if 'scp' in token_data:
+                                    st.write("Scopes granted:")
+                                    st.write(token_data['scp'])
+                            except Exception as e:
+                                st.error(f"Error decoding token: {str(e)}")
                         
-                        # Testing if we can at least access basic Graph endpoints
-                        try:
-                            response = requests.get("https://graph.microsoft.com/v1.0/me", headers=headers)
-                            st.write(f"Test /me response: {response.status_code}")
-                            if response.status_code != 200:
-                                st.code(response.text)
-                        except Exception as e:
-                            st.error(f"Error testing token: {str(e)}")
+                        # Test specific user ID if available
+                        user_id_to_test = None
+                        if st.session_state.designer_teams_id_mapping:
+                            designer, user_id_to_test = list(st.session_state.designer_teams_id_mapping.items())[0]
+                            st.subheader(f"Testing access to user: {designer}")
+                            
+                            # Check if user exists
+                            user_result, user_error = teams_client.check_user_exists(user_id_to_test)
+                            if user_result:
+                                st.success(f"✅ User exists: {user_result.get('displayName')}")
+                                st.json(user_result)
+                            else:
+                                st.error(f"❌ User check failed: {user_error}")
+                        
+                        # Test permissions
+                        st.subheader("Testing Graph API Permissions")
+                        
+                        # Organization access
+                        org_result, org_error = teams_client.test_organization_access()
+                        if org_result:
+                            st.success("✅ Can access organization information")
+                        else:
+                            st.error(f"❌ Organization access failed: {org_error}")
+                        
+                        # Users access
+                        users_result, users_error = teams_client.test_users_access()
+                        if users_result:
+                            st.success("✅ Can list users")
+                            if isinstance(users_result, dict) and 'value' in users_result:
+                                st.write(f"Found {len(users_result['value'])} users")
+                        else:
+                            st.error(f"❌ Users listing failed: {users_error}")
+                        
+                        # Chats access
+                        chats_result, chats_error = teams_client.test_chats_access()
+                        if chats_result:
+                            st.success("✅ Can access chats")
+                            if isinstance(chats_result, dict) and 'value' in chats_result:
+                                st.write(f"Found {len(chats_result['value'])} chats")
+                        else:
+                            st.error(f"❌ Chats access failed: {chats_error}")
+                        
+                        # Test chat creation if we have a user ID
+                        if user_id_to_test:
+                            st.subheader("Testing Chat Creation")
+                            chat_tests = teams_client.test_create_chat_permission(user_id_to_test)
+                            
+                            # Check standard approach
+                            if chat_tests["standard"]["result"]:
+                                st.success("✅ Standard chat creation works")
+                                st.json(chat_tests["standard"]["result"])
+                            else:
+                                st.error(f"❌ Standard chat creation failed: {chat_tests['standard']['error']}")
+                            
+                            # Check alternative approach
+                            if chat_tests["alternative"]["result"]:
+                                st.success("✅ Alternative chat creation works")
+                                st.json(chat_tests["alternative"]["result"])
+                            else:
+                                st.error(f"❌ Alternative chat creation failed: {chat_tests['alternative']['error']}")
+                                
+                            # Show detailed guidance based on errors
+                            all_errors = [
+                                chat_tests["standard"]["error"] or "",
+                                chat_tests["alternative"]["error"] or "",
+                                org_error or "",
+                                users_error or "",
+                                chats_error or ""
+                            ]
+                            error_text = "\n".join([e for e in all_errors if e])
+                            
+                            if "Authorization_RequestDenied" in error_text:
+                                st.info("💡 The error contains 'Authorization_RequestDenied' which means your app doesn't have the required permissions or they haven't been properly granted by an admin.")
+                            
+                            if "Invalid audience" in error_text:
+                                st.info("💡 The error contains 'Invalid audience' which means your token is for the wrong tenant or resource.")
+                            
+                            if "MailboxNotEnabledForRESTAPI" in error_text:
+                                st.info("💡 The error contains 'MailboxNotEnabledForRESTAPI' which means the user's mailbox doesn't support the REST API needed for chat operations.")
                     else:
-                        st.error("Authentication failed!")
+                        st.error("❌ Authentication failed!")
             except Exception as e:
-                st.error(f"Debug error: {str(e)}")
+                st.error(f"Diagnostic error: {str(e)}")
                 st.code(traceback.format_exc())
         
         # Designer to Teams ID mapping
