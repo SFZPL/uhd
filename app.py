@@ -13,6 +13,8 @@ from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
 import os
 import json
+import msal  # You'll need to pip install msal
+from teams_direct_messaging import TeamsDirectMessaging, send_teams_direct_message
 
 # Configure logging
 logging.basicConfig(
@@ -77,7 +79,33 @@ if 'designer_webhook_mapping' not in st.session_state:
     st.session_state.designer_webhook_mapping = {}
 if 'test_webhook_url' not in st.session_state:
     st.session_state.test_webhook_url = ""
+# Teams direct messaging settings
+if 'teams_direct_msg_enabled' not in st.session_state:
+    st.session_state.teams_direct_msg_enabled = False
+if 'azure_client_id' not in st.session_state:
+    st.session_state.azure_client_id = ""
+if 'azure_client_secret' not in st.session_state:
+    st.session_state.azure_client_secret = ""
+if 'azure_tenant_id' not in st.session_state:
+    st.session_state.azure_tenant_id = ""
+if 'designer_teams_id_mapping' not in st.session_state:
+    st.session_state.designer_teams_id_mapping = {}
+if 'teams_client' not in st.session_state:
+    st.session_state.teams_client = None
 
+# Load Azure AD credentials from secrets if they exist
+if hasattr(st.secrets, "AZURE_AD"):
+    if "CLIENT_ID" in st.secrets.AZURE_AD:
+        st.session_state.azure_client_id = st.secrets.AZURE_AD.CLIENT_ID
+    if "CLIENT_SECRET" in st.secrets.AZURE_AD:
+        st.session_state.azure_client_secret = st.secrets.AZURE_AD.CLIENT_SECRET
+    if "TENANT_ID" in st.secrets.AZURE_AD:
+        st.session_state.azure_tenant_id = st.secrets.AZURE_AD.TENANT_ID
+
+# Load Teams user ID mappings from secrets if they exist
+if hasattr(st.secrets, "TEAMS_USER_IDS"):
+    for designer, teams_id in st.secrets.TEAMS_USER_IDS.items():
+        st.session_state.designer_teams_id_mapping[designer] = teams_id
 # Load webhook mappings from secrets if they exist
 if hasattr(st.secrets, "WEBHOOKS"):
     for designer, webhook_url in st.secrets.WEBHOOKS.items():
@@ -102,6 +130,252 @@ if hasattr(st.secrets, "EMAIL"):
         st.session_state.smtp_username = st.secrets.EMAIL.SMTP_USERNAME
     if "SMTP_PASSWORD" in st.secrets.EMAIL and not st.session_state.smtp_password:
         st.session_state.smtp_password = st.secrets.EMAIL.SMTP_PASSWORD
+def render_teams_direct_messaging_ui():
+    """Render the UI for Teams direct messaging configuration"""
+    with st.sidebar.expander("Teams Direct Messaging", expanded=False):
+        st.session_state.teams_direct_msg_enabled = st.checkbox(
+            "Enable Teams Direct Messages", 
+            value=st.session_state.teams_direct_msg_enabled,
+            help="Send personal chat messages to designers in Microsoft Teams"
+        )
+        
+        # Azure AD App registration details
+        st.markdown("### Azure AD App Configuration")
+        st.info("You need to register an app in Azure AD with Microsoft Graph API permissions.")
+        
+        st.session_state.azure_client_id = st.text_input(
+            "Azure AD Client ID",
+            value=st.session_state.azure_client_id,
+            type="password", 
+            help="Client ID from your Azure AD app registration"
+        )
+        
+        st.session_state.azure_client_secret = st.text_input(
+            "Azure AD Client Secret",
+            value=st.session_state.azure_client_secret,
+            type="password",
+            help="Client secret from your Azure AD app registration"
+        )
+        
+        st.session_state.azure_tenant_id = st.text_input(
+            "Azure AD Tenant ID",
+            value=st.session_state.azure_tenant_id,
+            type="password",
+            help="Tenant ID of your Azure AD"
+        )
+        
+        # Designer to Teams ID mapping
+        st.markdown("### Designer Teams User ID Mapping")
+        st.markdown("""
+        Map designer names to their Microsoft Teams user IDs.
+        
+        You can get user IDs from:
+        1. Microsoft Teams admin portal
+        2. Using the Microsoft Graph Explorer
+        3. Using email addresses (our app can look up IDs)
+        """)
+        
+        # Allow mapping via email
+        st.markdown("#### Map Designer by Email Address")
+        col1, col2 = st.columns(2)
+        with col1:
+            lookup_designer = st.text_input("Designer Name", key="lookup_designer_name")
+        with col2:
+            lookup_email = st.text_input("Designer Email", key="lookup_designer_email")
+        
+        if st.button("Look up Teams ID"):
+            if not (st.session_state.azure_client_id and st.session_state.azure_client_secret and st.session_state.azure_tenant_id):
+                st.error("Please configure Azure AD credentials first")
+            elif not (lookup_designer and lookup_email):
+                st.error("Please enter both designer name and email address")
+            else:
+                # Create Teams client if not already created
+                if not st.session_state.teams_client:
+                    st.session_state.teams_client = TeamsDirectMessaging(
+                        st.session_state.azure_client_id,
+                        st.session_state.azure_client_secret,
+                        st.session_state.azure_tenant_id
+                    )
+                
+                with st.spinner("Looking up Teams user ID..."):
+                    # Authenticate if needed
+                    if not st.session_state.teams_client.authenticate():
+                        st.error("Failed to authenticate with Microsoft Graph API")
+                    else:
+                        # Look up user ID by email
+                        user_id = st.session_state.teams_client.get_user_id_by_email(lookup_email)
+                        
+                        if user_id:
+                            st.session_state.designer_teams_id_mapping[lookup_designer] = user_id
+                            st.success(f"Found Teams ID for {lookup_designer}!")
+                        else:
+                            st.error(f"Could not find Teams user with email {lookup_email}")
+        
+        # Manual mapping
+        st.markdown("#### Manual Mapping")
+        col1, col2 = st.columns(2)
+        with col1:
+            new_designer = st.text_input("Designer Name", key="new_teams_designer")
+        with col2:
+            new_teams_id = st.text_input("Teams User ID", key="new_teams_user_id")
+        
+        if st.button("Add Mapping"):
+            if new_designer and new_teams_id:
+                st.session_state.designer_teams_id_mapping[new_designer] = new_teams_id
+                st.success(f"Added Teams ID mapping for {new_designer}")
+            else:
+                st.error("Please enter both designer name and Teams user ID")
+        
+        # Display current mappings and allow removal
+        if st.session_state.designer_teams_id_mapping:
+            st.markdown("### Current Mappings")
+            for idx, (designer, teams_id) in enumerate(st.session_state.designer_teams_id_mapping.items()):
+                col1, col2, col3 = st.columns([3, 3, 1])
+                with col1:
+                    st.text(designer)
+                with col2:
+                    # Show just part of the ID for security
+                    masked_id = teams_id[:5] + "..." + teams_id[-5:] if len(teams_id) > 10 else teams_id
+                    st.text(masked_id)
+                with col3:
+                    if st.button("Remove", key=f"remove_teams_{idx}"):
+                        del st.session_state.designer_teams_id_mapping[designer]
+                        st.experimental_rerun()
+            
+            # Import/export options
+            st.markdown("### Import/Export Mappings")
+            
+            # Export button
+            if st.button("Export Mappings to CSV"):
+                mapping_df = pd.DataFrame({
+                    'Designer': list(st.session_state.designer_teams_id_mapping.keys()),
+                    'TeamsID': list(st.session_state.designer_teams_id_mapping.values())
+                })
+                csv = mapping_df.to_csv(index=False)
+                st.download_button(
+                    label="Download CSV",
+                    data=csv,
+                    file_name="teams_id_mappings.csv",
+                    mime="text/csv"
+                )
+            
+            # Import from CSV
+            uploaded_file = st.file_uploader("Upload CSV with Teams ID mappings", type="csv")
+            if uploaded_file is not None:
+                try:
+                    df = pd.read_csv(uploaded_file)
+                    if 'Designer' in df.columns and 'TeamsID' in df.columns:
+                        for _, row in df.iterrows():
+                            designer = row['Designer']
+                            teams_id = row['TeamsID']
+                            if designer and teams_id:
+                                st.session_state.designer_teams_id_mapping[designer] = teams_id
+                        st.success(f"Imported {len(df)} Teams ID mappings")
+                    else:
+                        st.error("CSV must have 'Designer' and 'TeamsID' columns")
+                except Exception as e:
+                    st.error(f"Error importing mappings: {e}")
+        
+        # Test button
+        st.markdown("### Test Direct Message")
+        
+        test_designer = st.selectbox(
+            "Select Designer to Test", 
+            options=list(st.session_state.designer_teams_id_mapping.keys()) if st.session_state.designer_teams_id_mapping else ["No designers mapped"]
+        )
+        
+        if st.button("Send Test Message"):
+            if not st.session_state.designer_teams_id_mapping:
+                st.error("Please add at least one designer Teams ID mapping")
+            elif not (st.session_state.azure_client_id and st.session_state.azure_client_secret and st.session_state.azure_tenant_id):
+                st.error("Please configure Azure AD credentials first")
+            else:
+                # Get test designer Teams ID
+                teams_id = st.session_state.designer_teams_id_mapping.get(test_designer)
+                
+                # Create Teams client if not already created
+                if not st.session_state.teams_client:
+                    st.session_state.teams_client = TeamsDirectMessaging(
+                        st.session_state.azure_client_id,
+                        st.session_state.azure_client_secret,
+                        st.session_state.azure_tenant_id
+                    )
+                
+                # Create test task for message
+                test_task = [{
+                    "Project": "Test Project",
+                    "Task": "Test Task",
+                    "Start Time": "09:00",
+                    "End Time": "17:00",
+                    "Allocated Hours": 8.0,
+                    "Date": datetime.now().date().strftime("%Y-%m-%d"),
+                    "Days Overdue": 1,
+                    "Client Success Member": "Test Manager"
+                }]
+                
+                with st.spinner("Sending test message..."):
+                    # Send test message
+                    success = send_teams_direct_message(
+                        test_designer,
+                        teams_id,
+                        test_task,
+                        st.session_state.teams_client
+                    )
+                    
+                    if success:
+                        st.success(f"Test message sent to {test_designer} in Teams")
+                    else:
+                        st.error("Failed to send test message. Check Azure AD credentials and Teams user ID.")
+
+def send_designer_teams_direct_messages(designers, selected_date):
+    """Send Teams direct messages to designers with missing timesheets"""
+    if not st.session_state.teams_direct_msg_enabled:
+        logger.info("Teams direct messages are disabled, skipping")
+        return False, 0, 0
+        
+    if not (st.session_state.azure_client_id and st.session_state.azure_client_secret and st.session_state.azure_tenant_id):
+        logger.error("Azure AD credentials not configured")
+        return False, 0, 0
+    
+    # Create Teams client if not already created
+    if not st.session_state.teams_client:
+        st.session_state.teams_client = TeamsDirectMessaging(
+            st.session_state.azure_client_id,
+            st.session_state.azure_client_secret,
+            st.session_state.azure_tenant_id
+        )
+    
+    # Authenticate with Microsoft Graph API
+    if not st.session_state.teams_client.authenticate():
+        logger.error("Failed to authenticate with Microsoft Graph API")
+        return False, 0, 0
+    
+    success_count = 0
+    fail_count = 0
+    
+    # Send direct message to each designer with missing timesheets
+    for designer, tasks in designers.items():
+        # Check if we have a Teams ID for this designer
+        if designer in st.session_state.designer_teams_id_mapping:
+            designer_teams_id = st.session_state.designer_teams_id_mapping[designer]
+            
+            # Send the direct message
+            message_sent = send_teams_direct_message(
+                designer,
+                designer_teams_id,
+                tasks,
+                st.session_state.teams_client
+            )
+            
+            if message_sent:
+                success_count += 1
+            else:
+                fail_count += 1
+        else:
+            logger.info(f"No Teams ID mapping found for designer {designer}")
+            fail_count += 1
+    
+    return True, success_count, fail_count
 
 def authenticate_odoo(url, db, username, password):
     """Authenticate with Odoo and return uid and models"""
@@ -1101,7 +1375,21 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     error_details = traceback.format_exc()
                     logger.error(f"Error sending Teams webhook notifications: {e}\n{error_details}")
                     st.warning(f"Error sending Teams webhook notifications: {e}")
-            
+            # Add after the Teams webhook notification section
+            # Send Teams direct messages if enabled
+            if st.session_state.teams_direct_msg_enabled and (missing_count > 0 or st.session_state.debug_mode):
+                try:
+                    sent, success_count, fail_count = send_designer_teams_direct_messages(designers, selected_date)
+                    
+                    if sent:
+                        if success_count > 0:
+                            st.success(f"Sent Teams direct messages to {success_count} designers")
+                        if fail_count > 0:
+                            st.warning(f"Failed to send Teams direct messages to {fail_count} designers")
+                except Exception as e:
+                    error_details = traceback.format_exc()
+                    logger.error(f"Error sending Teams direct messages: {e}\n{error_details}")
+                    st.warning(f"Error sending Teams direct messages: {e}")
             return df, missing_count, len(timesheet_entries)
         else:
             # Return empty DataFrame with columns
@@ -1486,6 +1774,7 @@ def main():
                         st.error("Failed to send test message. Check the webhook URL.")
                 else:
                     st.error("Please enter a webhook URL first")
+        render_teams_direct_messaging_ui() 
         # Connection settings
         with st.expander("Connection Settings"):
             odoo_url = st.text_input("Odoo URL", st.session_state.odoo_url)
