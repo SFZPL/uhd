@@ -356,19 +356,34 @@ def render_teams_direct_messaging_ui():
                     "Client Success Member": "Test Manager"
                 }]
                 
+                # Inside the "Send Test Message" button handler:
                 with st.spinner("Sending test message..."):
-                    # Send test message
+                    # Show debug info
+                    st.write(f"Using user ID: {teams_id}")
+                    st.write(f"Test task data: {test_task}")
+                    
+                    # Create a basic test message content
+                    simple_message = f"""
+                    <h2>Test Message</h2>
+                    <p>Hello {test_designer},</p>
+                    <p>This is a test message from the Missing Timesheet Reporter.</p>
+                    """
+                    
+                    # Try direct message with simple content first
+                    st.write("Attempting to send a simple message...")
+                    
+                    # First try the simple message
                     success = send_teams_direct_message(
                         test_designer,
                         teams_id,
-                        test_task,
+                        test_task,  # Make sure this is being passed
                         st.session_state.teams_client
                     )
                     
                     if success:
-                        st.success(f"Test message sent to {test_designer} in Teams")
+                        st.success(f"Test message sent to {test_designer}")
                     else:
-                        st.error("Failed to send test message. Check Azure AD credentials and Teams user ID.")
+                        st.error("Failed to send test message. Check logs for details.")
 def send_teams_direct_message(
         designer_name: str,
         designer_teams_id: str,
