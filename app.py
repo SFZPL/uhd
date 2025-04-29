@@ -281,7 +281,8 @@ def render_teams_direct_messaging_ui():
         
         test_designer = st.selectbox(
             "Select Designer to Test", 
-            options=list(st.session_state.designer_teams_id_mapping.keys()) if st.session_state.designer_teams_id_mapping else ["No designers mapped"]
+            options=list(st.session_state.designer_teams_id_mapping.keys()) if st.session_state.designer_teams_id_mapping else ["No designers mapped"],
+            key="teams_direct_msg_test_designer"  # Added unique key
         )
         
         if st.button("Send Test Message"):
