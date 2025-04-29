@@ -14,7 +14,7 @@ from email.mime.application import MIMEApplication
 import os
 import json
 import msal  # You'll need to pip install msal
-from teams_direct_messaging import TeamsDirectMessaging, send_teams_direct_message
+from teams_direct_messaging import TeamsDirectMessaging
 
 # Configure logging
 logging.basicConfig(
@@ -163,6 +163,48 @@ def render_teams_direct_messaging_ui():
             type="password",
             help="Tenant ID of your Azure AD"
         )
+        # Add debug button after Azure credentials
+        if st.button("Debug Teams Authentication", key="debug_teams_auth"):
+            try:
+                # Create Teams client 
+                teams_client = TeamsDirectMessaging(
+                    st.session_state.azure_client_id,
+                    st.session_state.azure_client_secret,
+                    st.session_state.azure_tenant_id
+                )
+                    
+                # Print credentials (partially masked)
+                st.write(f"Client ID: {st.session_state.azure_client_id[:5]}...{st.session_state.azure_client_id[-5:]}")
+                st.write(f"Tenant ID: {st.session_state.azure_tenant_id[:5]}...{st.session_state.azure_tenant_id[-5:]}")
+                st.write(f"Secret: {st.session_state.azure_client_secret[:5]}...{st.session_state.azure_client_secret[-5:]}")
+                    
+                # Test authentication
+                with st.spinner("Testing authentication..."):
+                    auth_result = teams_client.authenticate()
+                    if auth_result:
+                        st.success("Authentication successful!")
+                        # Try to get info about the token
+                        headers = {
+                            "Authorization": f"Bearer {teams_client.access_token}",
+                            "Content-Type": "application/json"
+                        }
+                        
+                        # This will help us understand what permissions the token has
+                        st.code(f"Access token first 20 chars: {teams_client.access_token[:20]}...")
+                        
+                        # Testing if we can at least access basic Graph endpoints
+                        try:
+                            response = requests.get("https://graph.microsoft.com/v1.0/me", headers=headers)
+                            st.write(f"Test /me response: {response.status_code}")
+                            if response.status_code != 200:
+                                st.code(response.text)
+                        except Exception as e:
+                            st.error(f"Error testing token: {str(e)}")
+                    else:
+                        st.error("Authentication failed!")
+            except Exception as e:
+                st.error(f"Debug error: {str(e)}")
+                st.code(traceback.format_exc())
         
         # Designer to Teams ID mapping
         st.markdown("### Designer Teams User ID Mapping")
@@ -327,7 +369,105 @@ def render_teams_direct_messaging_ui():
                         st.success(f"Test message sent to {test_designer} in Teams")
                     else:
                         st.error("Failed to send test message. Check Azure AD credentials and Teams user ID.")
+def send_teams_direct_message(
+        designer_name: str,
+        designer_teams_id: str,
+        tasks: list,
+        teams_client: TeamsDirectMessaging
+    ):
+    """
+    Send a direct message to a designer in Teams about missing timesheet entries
+    """
+    try:
+        # Add detailed debug logs
+        logger.info(f"Attempting to send message to {designer_name} with ID {designer_teams_id}")
+        logger.info(f"Teams client initialized with tenant: {teams_client.tenant_id[:5]}...{teams_client.tenant_id[-5:]}")
+        
+        # Test authentication first
+        logger.info("Attempting authentication with Microsoft Graph API...")
+        if not teams_client.authenticate():
+            logger.error("Authentication failed with Microsoft Graph API")
+            return False
+        
+        logger.info("Authentication successful, token acquired")
+        
+        # Try to create a chat
+        logger.info(f"Attempting to create chat with user ID: {designer_teams_id}")
+        chat_id = teams_client.create_chat(designer_teams_id)
+        if not chat_id:
+            logger.error(f"Failed to create chat with user {designer_name}")
+            return False
+            
+        logger.info(f"Successfully created chat with ID: {chat_id}")
+        
+        # Format message based on urgency
+        max_days_overdue = max(t.get("Days Overdue", 0) for t in tasks)
+        one_day = (max_days_overdue == 1)
+        two_plus = (max_days_overdue >= 2)
 
+        # Format title based on urgency
+        if one_day:
+            title = "Quick Nudge – Log Your Hours"
+            emoji = "🟠"
+            intro = ("This is a gentle reminder to log your hours for the "
+                     "task below — it only takes a minute:")
+        else:
+            title = "Heads-Up: You've Missed Logging Hours for 2 Days"
+            emoji = "🔴"
+            intro = ("It looks like no hours have been logged for the past "
+                     "two days for the task(s) below:")
+
+        # Create HTML for tasks table
+        tasks_html = "<table border='1' cellpadding='6' cellspacing='0'>"
+        tasks_html += "<tr><th>Task</th><th>Project</th><th>Date</th><th>Client Success Contact</th></tr>"
+        
+        for t in tasks:
+            tasks_html += f"""<tr>
+                <td>{t.get('Task', 'Unknown')}</td>
+                <td>{t.get('Project', 'Unknown')}</td>
+                <td>{t.get('Date', '—')}</td>
+                <td>{t.get('Client Success Member', 'Unknown')}</td>
+            </tr>"""
+        
+        tasks_html += "</table>"
+
+        # Create HTML message body
+        message_html = f"""
+        <h2>{emoji} {title}</h2>
+        <p>Hi {designer_name},</p>
+        <p>{intro}</p>
+        
+        {tasks_html}
+        
+        <p>
+            {"Taking a minute now helps us stay on top of things later 🙌<br>Let us know if you need any support with this." 
+            if one_day else 
+            "We completely understand things can get busy — but consistent time logging helps us improve project planning and smooth reporting.<br>If something's holding you back from logging your hours, just reach out. We're here to help."}
+        </p>
+        
+        <p style='font-size: 12px; color: gray;'>— Automated notice from the Missing Timesheet Reporter</p>
+        """
+
+        # Log the message content length (to check if it's too large)
+        logger.info(f"Message HTML length: {len(message_html)} characters")
+        
+        # Send message to chat
+        logger.info(f"Attempting to send message to chat ID: {chat_id}")
+        message_sent = teams_client.send_direct_message(chat_id, message_html)
+        
+        if message_sent:
+            logger.info(f"Direct message sent to {designer_name} via Teams")
+            return True
+        else:
+            logger.error(f"Failed to send direct message to {designer_name}")
+            return False
+
+    except Exception as exc:
+        logger.error(f"send_teams_direct_message failed: {exc}", exc_info=True)
+        # Log the full exception traceback for debugging
+        logger.error(traceback.format_exc())
+        return False
+    
 def send_designer_teams_direct_messages(designers, selected_date):
     """Send Teams direct messages to designers with missing timesheets"""
     if not st.session_state.teams_direct_msg_enabled:

@@ -2,6 +2,7 @@ import requests
 import json
 import logging
 import msal  # You'll need to pip install msal
+import traceback
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -15,33 +16,58 @@ class TeamsDirectMessaging:
         self.client_secret = client_secret
         self.tenant_id = tenant_id
         self.access_token = None
-        self.app = msal.ConfidentialClientApplication(
-            client_id=client_id,
-            client_credential=client_secret,
-            authority=f"https://login.microsoftonline.com/{tenant_id}"
-        )
+        
+        # Log initialization (mask sensitive parts)
+        client_id_masked = client_id[:5] + "..." + client_id[-5:] if client_id else "None"
+        tenant_id_masked = tenant_id[:5] + "..." + tenant_id[-5:] if tenant_id else "None"
+        logger.info(f"Initializing TeamsDirectMessaging with client_id: {client_id_masked}, tenant: {tenant_id_masked}")
+        
+        # Create MSAL application
+        try:
+            self.app = msal.ConfidentialClientApplication(
+                client_id=client_id,
+                client_credential=client_secret,
+                authority=f"https://login.microsoftonline.com/{tenant_id}"
+            )
+            logger.info("MSAL application initialized successfully")
+        except Exception as e:
+            logger.error(f"Error initializing MSAL application: {e}")
+            logger.error(traceback.format_exc())
+            self.app = None
     
     def authenticate(self):
         """Authenticate with Microsoft Graph API using client credentials flow"""
         try:
+            if not self.app:
+                logger.error("Cannot authenticate - MSAL application not initialized")
+                return False
+                
+            logger.info("Requesting token with scope: https://graph.microsoft.com/.default")
+            
             # Acquire token for application
             result = self.app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
             
             if "access_token" in result:
                 self.access_token = result["access_token"]
-                logger.info("Successfully authenticated with Microsoft Graph API")
+                token_preview = self.access_token[:10] + "..." + self.access_token[-10:] if self.access_token else "None"
+                logger.info(f"Successfully acquired token: {token_preview}")
                 return True
             else:
-                logger.error(f"Authentication failed: {result.get('error_description', 'Unknown error')}")
+                error = result.get('error', 'Unknown error')
+                description = result.get('error_description', 'No description')
+                logger.error(f"Authentication error: {error}: {description}")
                 return False
         except Exception as e:
-            logger.error(f"Error during authentication: {e}", exc_info=True)
+            logger.error(f"Error during authentication: {e}")
+            logger.error(traceback.format_exc())
             return False
     
     def get_user_id_by_email(self, email):
         """Get Teams user ID from email address"""
         if not self.access_token:
+            logger.info("No access token found, authenticating first")
             if not self.authenticate():
+                logger.error("Authentication failed before get_user_id_by_email")
                 return None
         
         headers = {
@@ -50,25 +76,35 @@ class TeamsDirectMessaging:
         }
         
         try:
-            response = requests.get(
-                f"https://graph.microsoft.com/v1.0/users/{email}",
-                headers=headers
-            )
+            url = f"https://graph.microsoft.com/v1.0/users/{email}"
+            logger.info(f"Making request to: {url}")
+            
+            response = requests.get(url, headers=headers)
+            
+            # Log status code and partial response
+            logger.info(f"Response status: {response.status_code}")
+            if response.status_code != 200:
+                logger.error(f"Response text: {response.text[:200]}...")
             
             if response.status_code == 200:
                 user_data = response.json()
-                return user_data.get("id")
+                user_id = user_data.get("id")
+                logger.info(f"Found user ID: {user_id[:5]}...{user_id[-5:]}" if user_id else "No user ID found")
+                return user_id
             else:
                 logger.error(f"Failed to get user ID for {email}. Status: {response.status_code}, Response: {response.text}")
                 return None
         except Exception as e:
-            logger.error(f"Error getting user ID: {e}", exc_info=True)
+            logger.error(f"Error getting user ID: {e}")
+            logger.error(traceback.format_exc())
             return None
     
     def create_chat(self, user_id):
         """Create or get a 1:1 chat with the user"""
         if not self.access_token:
+            logger.info("No access token found, authenticating first")
             if not self.authenticate():
+                logger.error("Authentication failed before create_chat")
                 return None
         
         headers = {
@@ -89,26 +125,59 @@ class TeamsDirectMessaging:
         }
         
         try:
+            url = "https://graph.microsoft.com/v1.0/chats"
+            logger.info(f"Making POST request to: {url}")
+            logger.info(f"Request payload: {json.dumps(chat_data)}")
+            
             response = requests.post(
-                "https://graph.microsoft.com/v1.0/chats",
+                url,
                 headers=headers,
                 json=chat_data
             )
             
+            # Log status code and partial response
+            logger.info(f"Response status: {response.status_code}")
+            if response.status_code != 201 and response.status_code != 200:
+                logger.error(f"Response text: {response.text[:200]}...")
+            
             if response.status_code in [200, 201]:
                 chat_info = response.json()
-                return chat_info.get("id")
+                chat_id = chat_info.get("id")
+                logger.info(f"Created/found chat with ID: {chat_id}")
+                return chat_id
             else:
                 logger.error(f"Failed to create chat. Status: {response.status_code}, Response: {response.text}")
+                
+                # Try getting existing chats as a fallback
+                logger.info("Attempting to find existing chat as fallback")
+                try:
+                    chats_response = requests.get(
+                        "https://graph.microsoft.com/v1.0/me/chats",
+                        headers=headers
+                    )
+                    
+                    if chats_response.status_code == 200:
+                        chats_data = chats_response.json()
+                        if 'value' in chats_data and len(chats_data['value']) > 0:
+                            # Just get the first chat ID we find
+                            fallback_chat_id = chats_data['value'][0].get('id')
+                            logger.info(f"Found fallback chat ID: {fallback_chat_id}")
+                            return fallback_chat_id
+                except Exception as fallback_error:
+                    logger.error(f"Fallback attempt failed: {fallback_error}")
+                
                 return None
         except Exception as e:
-            logger.error(f"Error creating chat: {e}", exc_info=True)
+            logger.error(f"Error creating chat: {e}")
+            logger.error(traceback.format_exc())
             return None
     
     def send_direct_message(self, chat_id, message_content):
         """Send a message to a Teams chat"""
         if not self.access_token:
+            logger.info("No access token found, authenticating first")
             if not self.authenticate():
+                logger.error("Authentication failed before send_direct_message")
                 return False
         
         headers = {
@@ -124,11 +193,20 @@ class TeamsDirectMessaging:
         }
         
         try:
+            url = f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages"
+            logger.info(f"Making POST request to: {url}")
+            logger.info(f"Message length: {len(message_content)} characters")
+            
             response = requests.post(
-                f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages",
+                url,
                 headers=headers,
                 json=message_data
             )
+            
+            # Log status code and partial response
+            logger.info(f"Response status: {response.status_code}")
+            if response.status_code != 201 and response.status_code != 200:
+                logger.error(f"Response text: {response.text[:200]}...")
             
             if response.status_code in [200, 201]:
                 logger.info(f"Message sent successfully to chat {chat_id}")
@@ -137,83 +215,6 @@ class TeamsDirectMessaging:
                 logger.error(f"Failed to send message. Status: {response.status_code}, Response: {response.text}")
                 return False
         except Exception as e:
-            logger.error(f"Error sending message: {e}", exc_info=True)
+            logger.error(f"Error sending message: {e}")
+            logger.error(traceback.format_exc())
             return False
-
-# Function to add to app.py
-def send_teams_direct_message(
-        designer_name: str,
-        designer_teams_id: str,
-        tasks: list,
-        teams_client: TeamsDirectMessaging
-    ):
-    """
-    Send a direct message to a designer in Teams about missing timesheet entries
-    """
-    try:
-        max_days_overdue = max(t.get("Days Overdue", 0) for t in tasks)
-        one_day = (max_days_overdue == 1)
-        two_plus = (max_days_overdue >= 2)
-
-        # Format title based on urgency
-        if one_day:
-            title = "Quick Nudge – Log Your Hours"
-            emoji = "🟠"
-            intro = ("This is a gentle reminder to log your hours for the "
-                     "task below — it only takes a minute:")
-        else:
-            title = "Heads-Up: You've Missed Logging Hours for 2 Days"
-            emoji = "🔴"
-            intro = ("It looks like no hours have been logged for the past "
-                     "two days for the task(s) below:")
-
-        # Create HTML for tasks table
-        tasks_html = "<table border='1' cellpadding='6' cellspacing='0'>"
-        tasks_html += "<tr><th>Task</th><th>Project</th><th>Date</th><th>Client Success Contact</th></tr>"
-        
-        for t in tasks:
-            tasks_html += f"""<tr>
-                <td>{t.get('Task', 'Unknown')}</td>
-                <td>{t.get('Project', 'Unknown')}</td>
-                <td>{t.get('Date', '—')}</td>
-                <td>{t.get('Client Success Member', 'Unknown')}</td>
-            </tr>"""
-        
-        tasks_html += "</table>"
-
-        # Create HTML message body
-        message_html = f"""
-        <h2>{emoji} {title}</h2>
-        <p>Hi {designer_name},</p>
-        <p>{intro}</p>
-        
-        {tasks_html}
-        
-        <p>
-            {"Taking a minute now helps us stay on top of things later 🙌<br>Let us know if you need any support with this." 
-            if one_day else 
-            "We completely understand things can get busy — but consistent time logging helps us improve project planning and smooth reporting.<br>If something's holding you back from logging your hours, just reach out. We're here to help."}
-        </p>
-        
-        <p style='font-size: 12px; color: gray;'>— Automated notice from the Missing Timesheet Reporter</p>
-        """
-
-        # Create or get chat with user
-        chat_id = teams_client.create_chat(designer_teams_id)
-        if not chat_id:
-            logger.error(f"Failed to create chat with user {designer_name}")
-            return False
-
-        # Send message to chat
-        message_sent = teams_client.send_direct_message(chat_id, message_html)
-        
-        if message_sent:
-            logger.info(f"Direct message sent to {designer_name} via Teams")
-            return True
-        else:
-            logger.error(f"Failed to send direct message to {designer_name}")
-            return False
-
-    except Exception as exc:
-        logger.error(f"send_teams_direct_message failed: {exc}", exc_info=True)
-        return False
