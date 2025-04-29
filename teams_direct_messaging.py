@@ -1,4 +1,6 @@
 import requests
+import os
+import streamlit as st
 import json
 import logging
 import msal  # You'll need to pip install msal
@@ -6,6 +8,17 @@ import traceback
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+SECOND_MEMBER_ID = (
+    os.getenv("TEAMS_SECOND_MEMBER_ID") or
+    st.secrets.get("TEAMS_SECOND_MEMBER", {}).get("ID")
+)
+if not SECOND_MEMBER_ID:
+    raise RuntimeError(
+        "SECOND_MEMBER_ID not found. "
+        "Add it to Streamlit secrets or set the env-var TEAMS_SECOND_MEMBER_ID."
+    )
+
 
 class TeamsDirectMessaging:
     """Class to handle Microsoft Teams direct messaging via Graph API"""
@@ -99,78 +112,58 @@ class TeamsDirectMessaging:
             logger.error(traceback.format_exc())
             return None
     
-    def create_chat(self, user_id):
-        """Create or get a 1:1 chat with the user"""
-        if not self.access_token:
-            logger.info("No access token found, authenticating first")
-            if not self.authenticate():
-                logger.error("Authentication failed before create_chat")
-                return None
-        
+    def create_chat(self, primary_user_id):
+        """
+        Create (or reuse) a 2-member group chat
+        • primary_user_id  = the designer being notified
+        • SECOND_MEMBER_ID = you (Ibrahim) for audit
+        Returns chat_id or None.
+        """
+        # ensure we have a token
+        if not self.access_token and not self.authenticate():
+            return None
+
         headers = {
             "Authorization": f"Bearer {self.access_token}",
-            "Content-Type": "application/json"
+            "Content-Type":  "application/json"
         }
-        
-        # Create a 1:1 chat
+
         chat_data = {
-            "chatType": "oneOnOne",
+            "chatType": "group",
             "members": [
                 {
-                    "@odata.type": "#microsoft.graph.aadUserConversationMember",
-                    "roles": ["owner"],
-                    "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{user_id}')"
+                "@odata.type": "#microsoft.graph.aadUserConversationMember",
+                "roles": ["owner"],
+                "user@odata.bind":
+                f"https://graph.microsoft.com/v1.0/users('{primary_user_id}')"
+                },
+                {
+                "@odata.type": "#microsoft.graph.aadUserConversationMember",
+                "roles": ["owner"],
+                "user@odata.bind":
+                f"https://graph.microsoft.com/v1.0/users('{SECOND_MEMBER_ID}')"
                 }
             ]
         }
-        
-        try:
-            url = "https://graph.microsoft.com/v1.0/chats"
-            logger.info(f"Making POST request to: {url}")
-            logger.info(f"Request payload: {json.dumps(chat_data)}")
-            
-            response = requests.post(
-                url,
-                headers=headers,
-                json=chat_data
-            )
-            
-            # Log status code and partial response
-            logger.info(f"Response status: {response.status_code}")
-            if response.status_code != 201 and response.status_code != 200:
-                logger.error(f"Response text: {response.text[:200]}...")
-            
-            if response.status_code in [200, 201]:
-                chat_info = response.json()
-                chat_id = chat_info.get("id")
-                logger.info(f"Created/found chat with ID: {chat_id}")
-                return chat_id
-            else:
-                logger.error(f"Failed to create chat. Status: {response.status_code}, Response: {response.text}")
-                
-                # Try getting existing chats as a fallback
-                logger.info("Attempting to find existing chat as fallback")
-                try:
-                    chats_response = requests.get(
-                        "https://graph.microsoft.com/v1.0/me/chats",
-                        headers=headers
-                    )
-                    
-                    if chats_response.status_code == 200:
-                        chats_data = chats_response.json()
-                        if 'value' in chats_data and len(chats_data['value']) > 0:
-                            # Just get the first chat ID we find
-                            fallback_chat_id = chats_data['value'][0].get('id')
-                            logger.info(f"Found fallback chat ID: {fallback_chat_id}")
-                            return fallback_chat_id
-                except Exception as fallback_error:
-                    logger.error(f"Fallback attempt failed: {fallback_error}")
-                
+
+        resp = requests.post("https://graph.microsoft.com/v1.0/chats",
+                            headers=headers, json=chat_data, timeout=10)
+
+        if resp.status_code in (200, 201):
+            chat_id = resp.json().get("id")
+            logger.info("Group chat created: %s", chat_id)
+            return chat_id
+
+        if resp.status_code == 409:        # roster already exists
+            try:
+                return resp.json().get("chatId") or resp.json()["value"][0]["id"]
+            except Exception:
+                logger.warning("409 returned but could not parse chatId")
                 return None
-        except Exception as e:
-            logger.error(f"Error creating chat: {e}")
-            logger.error(traceback.format_exc())
-            return None
+
+        logger.error("create_chat failed %s: %s", resp.status_code, resp.text)
+        return None
+        
     def create_direct_chat_alternative(self, user_id):
         """Try an alternative chat creation method"""
         if not self.access_token:
