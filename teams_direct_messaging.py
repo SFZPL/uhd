@@ -113,7 +113,7 @@ class TeamsDirectMessaging:
     
     def create_chat(self, user_id):
         """
-        Create a chat with a user using application permissions
+        Create a group chat with a user ID 
         Returns chat_id or None
         """
         if not self.access_token:
@@ -127,10 +127,13 @@ class TeamsDirectMessaging:
             "Content-Type": "application/json"
         }
         
-        # Using application permissions we need to create a group chat
+        # Create a unique chat topic with timestamp to avoid conflicts
+        chat_topic = f"Missing Timesheet Notification {int(time.time())}"
+        
+        # For application permissions, we need to create a group chat
         chat_data = {
             "chatType": "group",
-            "topic": "Missing Timesheet Notification",
+            "topic": chat_topic,
             "members": [
                 {
                     "@odata.type": "#microsoft.graph.aadUserConversationMember",
@@ -142,7 +145,7 @@ class TeamsDirectMessaging:
         
         try:
             url = "https://graph.microsoft.com/v1.0/chats"
-            logger.info(f"Creating chat with user ID: {user_id}")
+            logger.info(f"Creating chat with user ID: {user_id} and topic: {chat_topic}")
             
             response = requests.post(url, headers=headers, json=chat_data)
             
@@ -154,18 +157,16 @@ class TeamsDirectMessaging:
                 data = response.json()
                 chat_id = data.get("id")
                 logger.info(f"Successfully created chat with ID: {chat_id}")
-                
-                # Wait a moment to let the chat be fully created before sending messages
-                time.sleep(2)
                 return chat_id
             elif response.status_code == 409:  # Conflict - chat may already exist
+                logger.warning("Chat already exists, trying to extract ID from error message")
                 try:
                     # Try to get the existing chat ID from the response
                     error_data = response.json()
                     error_message = error_data.get("error", {}).get("message", "")
                     
                     # Try to extract the chat ID from the error message
-                    if "existing chat" in error_message.lower() and "'" in error_message:
+                    if "'" in error_message:
                         import re
                         match = re.search(r"'([^']+)'", error_message)
                         if match:
@@ -175,7 +176,8 @@ class TeamsDirectMessaging:
                 except Exception as e:
                     logger.error(f"Error parsing conflict response: {e}")
                 
-                # Fall back to alternative method
+                # If we couldn't extract the ID, try the alternative method
+                logger.info("Could not extract chat ID from error, trying alternative method")
                 return self._create_chat_alternative(user_id)
             else:
                 logger.error(f"Failed to create chat: {response.status_code} {response.text}")
@@ -188,8 +190,7 @@ class TeamsDirectMessaging:
 
     def _create_chat_alternative(self, user_id):
         """
-        Alternative approach to create a chat
-        This tries a different format that sometimes works when the standard one fails
+        Alternative approach to create a chat with a different format
         """
         if not self.access_token:
             if not self.authenticate():
@@ -200,9 +201,13 @@ class TeamsDirectMessaging:
             "Content-Type": "application/json"
         }
         
+        # Create a unique chat topic with timestamp to avoid conflicts
+        chat_topic = f"Timesheet Alert {int(time.time())}"
+        
         # Alternative format for chat creation
         chat_data = {
             "chatType": "group",
+            "topic": chat_topic,
             "members": [
                 {
                     "@odata.type": "#microsoft.graph.aadUserConversationMember",
@@ -213,26 +218,46 @@ class TeamsDirectMessaging:
         }
         
         try:
-            url = "https://graph.microsoft.com/v1.0/chats"
-            logger.info(f"Trying alternative chat creation for user ID: {user_id}")
+            # Try with beta endpoint
+            url = "https://graph.microsoft.com/beta/chats"
+            logger.info(f"Trying alternative chat creation with beta endpoint for user ID: {user_id}")
             
             response = requests.post(url, headers=headers, json=chat_data)
-            
-            # Log full response for debugging
-            logger.info(f"Alternative create chat response status: {response.status_code}")
-            logger.info(f"Alternative create chat response: {response.text[:500]}")
             
             if response.status_code in [200, 201]:
                 data = response.json()
                 chat_id = data.get("id")
-                logger.info(f"Successfully created chat with alternative approach: {chat_id}")
-                
-                # Wait a moment to let the chat be fully created before sending messages
-                time.sleep(2)
+                logger.info(f"Successfully created chat with beta endpoint: {chat_id}")
                 return chat_id
             else:
-                logger.error(f"Alternative chat creation failed: {response.status_code} {response.text}")
-                return None
+                logger.error(f"Beta endpoint chat creation failed: {response.status_code} {response.text}")
+                
+                # Try one more approach - chatType oneOnOne with beta endpoint
+                try:
+                    one_on_one_data = {
+                        "chatType": "oneOnOne",
+                        "members": [
+                            {
+                                "@odata.type": "#microsoft.graph.aadUserConversationMember",
+                                "roles": ["owner"],
+                                "user@odata.bind": f"https://graph.microsoft.com/v1.0/users/{user_id}"
+                            }
+                        ]
+                    }
+                    
+                    final_response = requests.post(url, headers=headers, json=one_on_one_data)
+                    
+                    if final_response.status_code in [200, 201]:
+                        final_data = final_response.json()
+                        chat_id = final_data.get("id")
+                        logger.info(f"Successfully created oneOnOne chat with beta endpoint: {chat_id}")
+                        return chat_id
+                    else:
+                        logger.error(f"Final attempt failed: {final_response.status_code} {final_response.text}")
+                        return None
+                except Exception as e:
+                    logger.error(f"Error in final chat creation attempt: {e}")
+                    return None
         except Exception as e:
             logger.error(f"Error in _create_chat_alternative: {e}")
             logger.error(traceback.format_exc())
@@ -240,7 +265,7 @@ class TeamsDirectMessaging:
     
     def send_direct_message(self, chat_id, message_content):
         """
-        Send a message to a chat with improved error handling and fallbacks
+        Send a message to a chat using the beta endpoint
         """
         if not self.access_token:
             if not self.authenticate():
@@ -251,76 +276,69 @@ class TeamsDirectMessaging:
             "Content-Type": "application/json"
         }
         
-        # First try: Simple text message as a test
-        simple_message = {
+        # Ensure we have chat_id
+        if not chat_id:
+            logger.error("Cannot send message - chat_id is empty")
+            return False
+            
+        # Wait to ensure chat is fully initialized
+        logger.info(f"Waiting 5 seconds for chat {chat_id} to fully initialize...")
+        time.sleep(5)
+        
+        # Use the beta endpoint
+        url = f"https://graph.microsoft.com/beta/chats/{chat_id}/messages"
+        
+        # Prepare a simple text message
+        message_data = {
             "body": {
-                "content": "Notification from Missing Timesheet Reporter",
+                "content": message_content,
                 "contentType": "text"
             }
         }
         
         try:
-            url = f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages"
-            logger.info(f"Testing message sending to chat ID: {chat_id}")
+            logger.info(f"Sending message to beta endpoint for chat ID: {chat_id}")
+            logger.info(f"Message content preview: {message_content[:100]}...")
             
-            # First send a simple test message
-            simple_response = requests.post(url, headers=headers, json=simple_message)
-            logger.info(f"Simple message response: Status {simple_response.status_code}")
+            response = requests.post(url, headers=headers, json=message_data)
             
-            if simple_response.status_code in [200, 201]:
-                logger.info("Simple test message sent successfully, now sending full message")
-                
-                # Wait a moment before sending the main message
-                time.sleep(1)
-                
-                # Now try sending the full HTML message in parts to avoid potential size issues
-                # First send the header
-                header = f"""
-                <div>
-                <h2>Missing Timesheet Notification</h2>
-                <p>Hi there,</p>
-                <p>This is a notification about missing timesheet entries.</p>
-                </div>
-                """
-                
-                header_message = {
-                    "body": {
-                        "content": header,
-                        "contentType": "html"
-                    }
-                }
-                
-                header_response = requests.post(url, headers=headers, json=header_message)
-                logger.info(f"Header message response: Status {header_response.status_code}")
-                
-                # Now send the content as plain text
-                content_text = "Please check your assigned tasks and log your hours as soon as possible."
-                
-                content_message = {
-                    "body": {
-                        "content": content_text,
-                        "contentType": "text"
-                    }
-                }
-                
-                content_response = requests.post(url, headers=headers, json=content_message)
-                logger.info(f"Content message response: Status {content_response.status_code}")
-                
-                # Success if at least the simple message was sent
+            logger.info(f"Send message response status: {response.status_code}")
+            logger.info(f"Response headers: {dict(response.headers)}")
+            logger.info(f"Response content (truncated): {response.text[:300]}...")
+            
+            if response.status_code in [200, 201]:
+                logger.info(f"Successfully sent message to chat {chat_id}")
                 return True
             else:
-                logger.error(f"Failed to send even simple message: {simple_response.status_code} {simple_response.text}")
+                logger.error(f"Failed to send message: {response.status_code} {response.text}")
                 
-                # Final fallback - try with beta endpoint
-                beta_url = f"https://graph.microsoft.com/beta/chats/{chat_id}/messages"
-                beta_response = requests.post(beta_url, headers=headers, json=simple_message)
+                # As a last resort, try adding a team member to the chat
+                # Sometimes this "wakes up" the chat functionality
+                try:
+                    logger.info("Attempting to add a bot to the chat to wake it up")
+                    # This is a common Microsoft bot ID - adjust if needed
+                    bot_id = "28:0d5e1277-895a-4a41-bca4-6e5e2e0f8e36"
+                    
+                    add_member_url = f"https://graph.microsoft.com/beta/chats/{chat_id}/members"
+                    add_member_data = {
+                        "@odata.type": "#microsoft.graph.aadUserConversationMember",
+                        "roles": ["member"],
+                        "user@odata.bind": f"https://graph.microsoft.com/v1.0/users('{bot_id}')"
+                    }
+                    
+                    requests.post(add_member_url, headers=headers, json=add_member_data)
+                    
+                    # Try sending the message again
+                    time.sleep(2)
+                    retry_response = requests.post(url, headers=headers, json=message_data)
+                    
+                    if retry_response.status_code in [200, 201]:
+                        logger.info("Successfully sent message after adding bot")
+                        return True
+                except Exception as e:
+                    logger.error(f"Error in bot addition attempt: {e}")
                 
-                if beta_response.status_code in [200, 201]:
-                    logger.info("Successfully sent message using beta endpoint")
-                    return True
-                else:
-                    logger.error(f"Beta endpoint also failed: {beta_response.status_code} {beta_response.text}")
-                    return False
+                return False
         except Exception as e:
             logger.error(f"Error in send_direct_message: {e}", exc_info=True)
             return False
@@ -367,3 +385,282 @@ class TeamsDirectMessaging:
                 return {"status": "partial", "message": "Token obtained but in unexpected format"}
         except Exception as e:
             return {"status": "partial", "message": f"Token obtained but error analyzing it: {str(e)}"}
+
+
+def send_teams_direct_message(
+        designer_name: str,
+        designer_teams_id: str,
+        tasks: list,
+        teams_client: TeamsDirectMessaging
+    ):
+    """
+    Send a direct message to a designer in Teams about missing timesheet entries
+    """
+    try:
+        # Add detailed debug logs
+        logger.info(f"Attempting to send message to {designer_name} with ID {designer_teams_id}")
+        
+        # Test authentication first
+        logger.info("Authenticating with Microsoft Graph API...")
+        if not teams_client.authenticate():
+            logger.error("Authentication failed with Microsoft Graph API")
+            return False
+        
+        logger.info("Authentication successful, token acquired")
+        
+        # Try to create a chat
+        logger.info(f"Attempting to create chat with user ID: {designer_teams_id}")
+        chat_id = teams_client.create_chat(designer_teams_id)
+            
+        if not chat_id:
+            logger.error(f"Failed to create chat with user {designer_name}")
+            return False
+            
+        logger.info(f"Successfully created/found chat with ID: {chat_id}")
+        
+        # Format a simple text message - avoid HTML completely
+        max_days_overdue = max(t.get("Days Overdue", 0) for t in tasks)
+        one_day = (max_days_overdue == 1)
+        
+        message = f"{'🟠' if one_day else '🔴'} Missing Timesheet Alert\n\n"
+        message += f"Hi {designer_name},\n\n"
+        
+        if one_day:
+            message += "This is a gentle reminder to log your hours for the task(s) below — it only takes a minute:\n\n"
+        else:
+            message += "It looks like no hours have been logged for the past two days for the task(s) below:\n\n"
+        
+        # Add tasks in simple text format
+        for i, t in enumerate(tasks, 1):
+            message += f"{i}. Project: {t.get('Project', 'Unknown')}\n"
+            message += f"   Task: {t.get('Task', 'Unknown')}\n"
+            message += f"   Date: {t.get('Date', '—')}\n"
+            message += f"   CS Contact: {t.get('Client Success Member', 'Unknown')}\n\n"
+        
+        # Add footer
+        if one_day:
+            message += "Taking a minute now helps us stay on top of things later 🙌\n"
+            message += "Let us know if you need any support with this.\n\n"
+        else:
+            message += "We completely understand things can get busy — but consistent time logging "
+            message += "helps us improve project planning and smooth reporting.\n"
+            message += "If something's holding you back from logging your hours, just reach out. We're here to help.\n\n"
+        
+        message += "— Automated notice from the Missing Timesheet Reporter"
+        
+        # Send the message
+        message_sent = teams_client.send_direct_message(chat_id, message)
+        
+        if message_sent:
+            logger.info(f"Direct message sent to {designer_name} via Teams")
+            return True
+        else:
+            logger.error(f"Failed to send direct message to {designer_name}")
+            return False
+
+    except Exception as exc:
+        logger.error(f"send_teams_direct_message failed: {exc}", exc_info=True)
+        # Log the full exception traceback for debugging
+        logger.error(traceback.format_exc())
+        return False
+
+
+def render_teams_direct_messaging_ui():
+    """Render the UI for Teams direct messaging configuration"""
+    with st.sidebar.expander("Teams Direct Messaging", expanded=False):
+        st.session_state.teams_direct_msg_enabled = st.checkbox(
+            "Enable Teams Direct Messages", 
+            value=st.session_state.teams_direct_msg_enabled,
+            help="Send personal chat messages to designers in Microsoft Teams"
+        )
+        
+        # Azure AD App registration details
+        st.markdown("### Azure AD App Configuration")
+        st.info("You need to register an app in Azure AD with Microsoft Graph API permissions: Chat.Create, Chat.Read.All, Chat.ReadWrite.All.")
+        
+        st.session_state.azure_client_id = st.text_input(
+            "Azure AD Client ID",
+            value=st.session_state.azure_client_id,
+            type="password", 
+            help="Client ID from your Azure AD app registration"
+        )
+        
+        st.session_state.azure_client_secret = st.text_input(
+            "Azure AD Client Secret",
+            value=st.session_state.azure_client_secret,
+            type="password",
+            help="Client secret from your Azure AD app registration"
+        )
+        
+        st.session_state.azure_tenant_id = st.text_input(
+            "Azure AD Tenant ID",
+            value=st.session_state.azure_tenant_id,
+            type="password",
+            help="Tenant ID of your Azure AD"
+        )
+        
+        # Simple authentication test
+        if st.button("Test Authentication"):
+            if not (st.session_state.azure_client_id and st.session_state.azure_client_secret and st.session_state.azure_tenant_id):
+                st.error("Please configure Azure AD credentials first")
+            else:
+                try:
+                    # Create Teams client
+                    client = TeamsDirectMessaging(
+                        st.session_state.azure_client_id,
+                        st.session_state.azure_client_secret,
+                        st.session_state.azure_tenant_id
+                    )
+                    
+                    # Test authentication
+                    with st.spinner("Testing authentication..."):
+                        auth_result = client.authenticate()
+                        if auth_result:
+                            st.success("✅ Authentication successful!")
+                            
+                            # Try to get token info
+                            token_info = client.check_authentication()
+                            if token_info["status"] == "success":
+                                st.subheader("Token Information")
+                                st.write(f"App ID: {token_info.get('app_id')}")
+                                st.write(f"Tenant ID: {token_info.get('tenant_id')}")
+                                
+                                # Show permissions
+                                if 'roles' in token_info and token_info['roles']:
+                                    st.write("Application Permissions:")
+                                    for role in token_info['roles']:
+                                        st.write(f"- {role}")
+                        else:
+                            st.error("❌ Authentication failed!")
+                except Exception as e:
+                    st.error(f"Error testing authentication: {str(e)}")
+        
+        # Designer to Teams ID mapping
+        st.markdown("### Designer Teams User ID Mapping")
+        st.markdown("""
+        Map designer names to their Microsoft Teams user IDs.
+        
+        You can get user IDs from:
+        1. Microsoft Teams admin portal
+        2. Using the Microsoft Graph Explorer
+        3. Using email addresses (if your app has User.Read.All permission)
+        """)
+        
+        # Allow mapping via email
+        st.markdown("#### Map Designer by Email Address")
+        col1, col2 = st.columns(2)
+        with col1:
+            lookup_designer = st.text_input("Designer Name", key="lookup_designer_name")
+        with col2:
+            lookup_email = st.text_input("Designer Email", key="lookup_designer_email")
+        
+        if st.button("Look up Teams ID"):
+            if not (st.session_state.azure_client_id and st.session_state.azure_client_secret and st.session_state.azure_tenant_id):
+                st.error("Please configure Azure AD credentials first")
+            elif not (lookup_designer and lookup_email):
+                st.error("Please enter both designer name and email address")
+            else:
+                # Create Teams client for lookup
+                client = TeamsDirectMessaging(
+                    st.session_state.azure_client_id,
+                    st.session_state.azure_client_secret,
+                    st.session_state.azure_tenant_id
+                )
+                
+                with st.spinner("Looking up Teams user ID..."):
+                    # Authenticate
+                    if not client.authenticate():
+                        st.error("Failed to authenticate with Microsoft Graph API")
+                    else:
+                        # Look up user ID by email
+                        user_id = client.get_user_id_by_email(lookup_email)
+                        
+                        if user_id:
+                            st.session_state.designer_teams_id_mapping[lookup_designer] = user_id
+                            st.success(f"Found Teams ID for {lookup_designer}!")
+                        else:
+                            st.error(f"Could not find Teams user with email {lookup_email}. This might be because your app doesn't have User.Read.All permission.")
+                            st.info("You'll need to manually add the designer's Teams ID.")
+        
+        # Manual mapping
+        st.markdown("#### Manual Mapping")
+        col1, col2 = st.columns(2)
+        with col1:
+            new_designer = st.text_input("Designer Name", key="new_teams_designer")
+        with col2:
+            new_teams_id = st.text_input("Teams User ID", key="new_teams_user_id")
+        
+        if st.button("Add Mapping"):
+            if new_designer and new_teams_id:
+                st.session_state.designer_teams_id_mapping[new_designer] = new_teams_id
+                st.success(f"Added Teams ID mapping for {new_designer}")
+            else:
+                st.error("Please enter both designer name and Teams user ID")
+        
+        # Display current mappings and allow removal
+        if st.session_state.designer_teams_id_mapping:
+            st.markdown("### Current Mappings")
+            for idx, (designer, teams_id) in enumerate(st.session_state.designer_teams_id_mapping.items()):
+                col1, col2, col3 = st.columns([3, 3, 1])
+                with col1:
+                    st.text(designer)
+                with col2:
+                    # Show just part of the ID for security
+                    masked_id = teams_id[:5] + "..." + teams_id[-5:] if len(teams_id) > 10 else teams_id
+                    st.text(masked_id)
+                with col3:
+                    if st.button("Remove", key=f"remove_teams_{idx}"):
+                        del st.session_state.designer_teams_id_mapping[designer]
+                        st.experimental_rerun()
+        
+        # Test message section
+        st.markdown("### Test Direct Message")
+        test_designer = st.selectbox(
+            "Select Designer to Test", 
+            options=list(st.session_state.designer_teams_id_mapping.keys()) if st.session_state.designer_teams_id_mapping else ["No designers mapped"],
+            key="teams_direct_msg_test_designer"
+        )
+        
+        if st.button("Send Test Message"):
+            if not st.session_state.designer_teams_id_mapping:
+                st.error("Please add at least one designer Teams ID mapping")
+            elif not (st.session_state.azure_client_id and st.session_state.azure_client_secret and st.session_state.azure_tenant_id):
+                st.error("Please configure Azure AD credentials first")
+            elif test_designer == "No designers mapped":
+                st.error("Please add at least one designer mapping first")
+            else:
+                # Get test designer Teams ID
+                teams_id = st.session_state.designer_teams_id_mapping.get(test_designer)
+                
+                # Create Teams client for testing
+                client = TeamsDirectMessaging(
+                    st.session_state.azure_client_id,
+                    st.session_state.azure_client_secret,
+                    st.session_state.azure_tenant_id
+                )
+                
+                # Create test task
+                test_task = [{
+                    "Project": "Test Project",
+                    "Task": "Test Task",
+                    "Start Time": "09:00",
+                    "End Time": "17:00",
+                    "Allocated Hours": 8.0,
+                    "Date": datetime.now().date().strftime("%Y-%m-%d"),
+                    "Days Overdue": 1,
+                    "Client Success Member": "Test Manager"
+                }]
+                
+                with st.spinner("Sending test message..."):
+                    # Send the test message
+                    message_sent = send_teams_direct_message(
+                        test_designer,
+                        teams_id,
+                        test_task,
+                        client
+                    )
+                    
+                    if message_sent:
+                        st.success(f"Test message sent to {test_designer}")
+                    else:
+                        st.error(f"Failed to send test message to {test_designer}")
