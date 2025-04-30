@@ -342,19 +342,3 @@ class TeamsMessenger:
         return False
 
 
-def send_designer_notification(designer_name, designer_teams_id, tasks):
-    """Simplified function for debugging Teams messaging"""
-    import streamlit as st
-    
-    # Create messenger
-    messenger = TeamsMessenger(
-        st.session_state.azure_client_id,
-        st.session_state.azure_client_secret,
-        st.session_state.azure_tenant_id
-    )
-    
-    # Use a very simple message for testing
-    message = f"Test message for debugging - please log your timesheet entries."
-    
-    # Send notification with extensive debugging
-    return messenger.notify_user(designer_teams_id, message)

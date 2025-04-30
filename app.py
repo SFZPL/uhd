@@ -14,6 +14,7 @@ from email.mime.application import MIMEApplication
 import os
 import json
 import msal  # You'll need to pip install msal
+import time
 from teams_direct_messaging import TeamsMessenger
 
 
@@ -132,7 +133,9 @@ if hasattr(st.secrets, "EMAIL"):
         st.session_state.smtp_password = st.secrets.EMAIL.SMTP_PASSWORD
 
 def send_designer_notification(designer_name, designer_teams_id, tasks):
-    """Simplified function to send a notification to a designer"""
+    """Debug function for Teams messaging"""
+    # Clear previous debug history when starting a new test
+    st.session_state.teams_debug_history = []
     
     # Create messenger
     messenger = TeamsMessenger(
@@ -141,38 +144,28 @@ def send_designer_notification(designer_name, designer_teams_id, tasks):
         st.session_state.azure_tenant_id
     )
     
-    # Format a simple text message
-    max_days_overdue = max(t.get("Days Overdue", 0) for t in tasks)
-    one_day = (max_days_overdue == 1)
+    # Use a very simple message for testing
+    message = f"Test message for debugging - please log your timesheet entries."
     
-    message = f"{'🟠' if one_day else '🔴'} Missing Timesheet Alert\n\n"
-    message += f"Hi {designer_name},\n\n"
+    # Send notification with extensive debugging
+    result = messenger.notify_user(designer_teams_id, message)
     
-    if one_day:
-        message += "This is a gentle reminder to log your hours for the task(s) below — it only takes a minute:\n\n"
-    else:
-        message += "It looks like no hours have been logged for the past two days for the task(s) below:\n\n"
+    # After running, display debug info in the UI
+    if st.session_state.teams_debug_history:
+        with st.expander("Teams Debugging Information", expanded=True):
+            st.write("### Teams API Debug Log")
+            
+            for entry in st.session_state.teams_debug_history:
+                timestamp = entry["timestamp"]
+                level = entry["level"]
+                message = entry["message"]
+                
+                if level == "error":
+                    st.error(f"{timestamp}: {message}")
+                else:
+                    st.info(f"{timestamp}: {message}")
     
-    # Add tasks in simple text format
-    for i, t in enumerate(tasks, 1):
-        message += f"{i}. Project: {t.get('Project', 'Unknown')}\n"
-        message += f"   Task: {t.get('Task', 'Unknown')}\n"
-        message += f"   Date: {t.get('Date', '—')}\n"
-        message += f"   CS Contact: {t.get('Client Success Member', 'Unknown')}\n\n"
-    
-    # Add footer
-    if one_day:
-        message += "Taking a minute now helps us stay on top of things later 🙌\n"
-        message += "Let us know if you need any support with this.\n\n"
-    else:
-        message += "We completely understand things can get busy — but consistent time logging "
-        message += "helps us improve project planning and smooth reporting.\n"
-        message += "If something's holding you back from logging your hours, just reach out. We're here to help.\n\n"
-    
-    message += "— Automated notice from the Missing Timesheet Reporter"
-    
-    # Send notification
-    return messenger.notify_user(designer_teams_id, message)
+    return result
 
 def render_teams_direct_messaging_ui():
     """Render the UI for Teams direct messaging configuration"""
@@ -208,13 +201,16 @@ def render_teams_direct_messaging_ui():
             help="Tenant ID of your Azure AD"
         )
         
-        # Simple authentication test
+        # Authentication test with debug info
         if st.button("Test Authentication"):
             if not (st.session_state.azure_client_id and st.session_state.azure_client_secret and st.session_state.azure_tenant_id):
                 st.error("Please configure Azure AD credentials first")
             else:
+                # Clear previous debug history
+                st.session_state.teams_debug_history = []
+                
                 try:
-                    # Create Teams messenger
+                    # Create Teams messenger for testing
                     messenger = TeamsMessenger(
                         st.session_state.azure_client_id,
                         st.session_state.azure_client_secret,
@@ -228,6 +224,19 @@ def render_teams_direct_messaging_ui():
                             st.success("✅ Authentication successful!")
                         else:
                             st.error("❌ Authentication failed!")
+                            
+                    # Display debug info
+                    if st.session_state.teams_debug_history:
+                        with st.expander("Authentication Debug Info", expanded=True):
+                            for entry in st.session_state.teams_debug_history:
+                                timestamp = entry["timestamp"]
+                                level = entry["level"]
+                                message = entry["message"]
+                                
+                                if level == "error":
+                                    st.error(f"{timestamp}: {message}")
+                                else:
+                                    st.info(f"{timestamp}: {message}")
                 except Exception as e:
                     st.error(f"Error testing authentication: {str(e)}")
         
@@ -265,15 +274,15 @@ def render_teams_direct_messaging_ui():
                         del st.session_state.designer_teams_id_mapping[designer]
                         st.experimental_rerun()
         
-        # Test message section
-        st.markdown("### Test Notification")
+        # Test message section with debugging
+        st.markdown("### Debug Message Sending")
         test_designer = st.selectbox(
             "Select Designer to Test", 
             options=list(st.session_state.designer_teams_id_mapping.keys()) if st.session_state.designer_teams_id_mapping else ["No designers mapped"],
             key="teams_direct_msg_test_designer"
         )
         
-        if st.button("Send Test Notification"):
+        if st.button("Debug Message Sending"):
             if not st.session_state.designer_teams_id_mapping:
                 st.error("Please add at least one designer Teams ID mapping")
             elif not (st.session_state.azure_client_id and st.session_state.azure_client_secret and st.session_state.azure_tenant_id):
@@ -291,13 +300,13 @@ def render_teams_direct_messaging_ui():
                     "Start Time": "09:00",
                     "End Time": "17:00",
                     "Allocated Hours": 8.0,
-                    "Date": datetime.now().date().strftime("%Y-%m-%d"),
+                    "Date": time.strftime("%Y-%m-%d"),
                     "Days Overdue": 1,
                     "Client Success Member": "Test Manager"
                 }]
                 
-                with st.spinner("Sending test notification..."):
-                    # Send the test notification
+                with st.spinner("Testing message sending..."):
+                    # Send test notification with debugging
                     notification_sent = send_designer_notification(
                         test_designer,
                         teams_id,
@@ -305,10 +314,9 @@ def render_teams_direct_messaging_ui():
                     )
                     
                     if notification_sent:
-                        st.success(f"Notification sent to {test_designer}! Check your Teams app.")
+                        st.success(f"Message sending succeeded for {test_designer}")
                     else:
-                        st.error(f"Failed to send notification to {test_designer}")
-
+                        st.error(f"Message sending failed for {test_designer}")
     
 def send_designer_teams_direct_messages(designers, selected_date):
     """Send Teams direct messages to designers with missing timesheets"""
