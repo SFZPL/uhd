@@ -14,7 +14,7 @@ from email.mime.application import MIMEApplication
 import os
 import json
 import msal  # You'll need to pip install msal
-from teams_direct_messaging import TeamsDirectMessaging
+from teams_direct_messaging import TeamsMessenger
 
 
 # Configure logging
@@ -91,8 +91,7 @@ if 'azure_tenant_id' not in st.session_state:
     st.session_state.azure_tenant_id = ""
 if 'designer_teams_id_mapping' not in st.session_state:
     st.session_state.designer_teams_id_mapping = {}
-if 'teams_client' not in st.session_state:
-    st.session_state.teams_client = None
+
 
 # Load Azure AD credentials from secrets if they exist
 if hasattr(st.secrets, "AZURE_AD"):
@@ -131,6 +130,49 @@ if hasattr(st.secrets, "EMAIL"):
         st.session_state.smtp_username = st.secrets.EMAIL.SMTP_USERNAME
     if "SMTP_PASSWORD" in st.secrets.EMAIL and not st.session_state.smtp_password:
         st.session_state.smtp_password = st.secrets.EMAIL.SMTP_PASSWORD
+
+def send_designer_notification(designer_name, designer_teams_id, tasks):
+    """Simplified function to send a notification to a designer"""
+    
+    # Create messenger
+    messenger = TeamsMessenger(
+        st.session_state.azure_client_id,
+        st.session_state.azure_client_secret,
+        st.session_state.azure_tenant_id
+    )
+    
+    # Format a simple text message
+    max_days_overdue = max(t.get("Days Overdue", 0) for t in tasks)
+    one_day = (max_days_overdue == 1)
+    
+    message = f"{'🟠' if one_day else '🔴'} Missing Timesheet Alert\n\n"
+    message += f"Hi {designer_name},\n\n"
+    
+    if one_day:
+        message += "This is a gentle reminder to log your hours for the task(s) below — it only takes a minute:\n\n"
+    else:
+        message += "It looks like no hours have been logged for the past two days for the task(s) below:\n\n"
+    
+    # Add tasks in simple text format
+    for i, t in enumerate(tasks, 1):
+        message += f"{i}. Project: {t.get('Project', 'Unknown')}\n"
+        message += f"   Task: {t.get('Task', 'Unknown')}\n"
+        message += f"   Date: {t.get('Date', '—')}\n"
+        message += f"   CS Contact: {t.get('Client Success Member', 'Unknown')}\n\n"
+    
+    # Add footer
+    if one_day:
+        message += "Taking a minute now helps us stay on top of things later 🙌\n"
+        message += "Let us know if you need any support with this.\n\n"
+    else:
+        message += "We completely understand things can get busy — but consistent time logging "
+        message += "helps us improve project planning and smooth reporting.\n"
+        message += "If something's holding you back from logging your hours, just reach out. We're here to help.\n\n"
+    
+    message += "— Automated notice from the Missing Timesheet Reporter"
+    
+    # Send notification
+    return messenger.notify_user(designer_teams_id, message)
 
 def render_teams_direct_messaging_ui():
     """Render the UI for Teams direct messaging configuration"""
@@ -172,8 +214,8 @@ def render_teams_direct_messaging_ui():
                 st.error("Please configure Azure AD credentials first")
             else:
                 try:
-                    # Create Teams client
-                    client = TeamsDirectMessaging(
+                    # Create Teams messenger
+                    messenger = TeamsMessenger(
                         st.session_state.azure_client_id,
                         st.session_state.azure_client_secret,
                         st.session_state.azure_tenant_id
@@ -181,22 +223,9 @@ def render_teams_direct_messaging_ui():
                     
                     # Test authentication
                     with st.spinner("Testing authentication..."):
-                        auth_result = client.authenticate()
+                        auth_result = messenger.authenticate()
                         if auth_result:
                             st.success("✅ Authentication successful!")
-                            
-                            # Try to get token info
-                            token_info = client.check_authentication()
-                            if token_info["status"] == "success":
-                                st.subheader("Token Information")
-                                st.write(f"App ID: {token_info.get('app_id')}")
-                                st.write(f"Tenant ID: {token_info.get('tenant_id')}")
-                                
-                                # Show permissions
-                                if 'roles' in token_info and token_info['roles']:
-                                    st.write("Application Permissions:")
-                                    for role in token_info['roles']:
-                                        st.write(f"- {role}")
                         else:
                             st.error("❌ Authentication failed!")
                 except Exception as e:
@@ -204,50 +233,6 @@ def render_teams_direct_messaging_ui():
         
         # Designer to Teams ID mapping
         st.markdown("### Designer Teams User ID Mapping")
-        st.markdown("""
-        Map designer names to their Microsoft Teams user IDs.
-        
-        You can get user IDs from:
-        1. Microsoft Teams admin portal
-        2. Using the Microsoft Graph Explorer
-        3. Using email addresses (if your app has User.Read.All permission)
-        """)
-        
-        # Allow mapping via email
-        st.markdown("#### Map Designer by Email Address")
-        col1, col2 = st.columns(2)
-        with col1:
-            lookup_designer = st.text_input("Designer Name", key="lookup_designer_name")
-        with col2:
-            lookup_email = st.text_input("Designer Email", key="lookup_designer_email")
-        
-        if st.button("Look up Teams ID"):
-            if not (st.session_state.azure_client_id and st.session_state.azure_client_secret and st.session_state.azure_tenant_id):
-                st.error("Please configure Azure AD credentials first")
-            elif not (lookup_designer and lookup_email):
-                st.error("Please enter both designer name and email address")
-            else:
-                # Create Teams client for lookup
-                client = TeamsDirectMessaging(
-                    st.session_state.azure_client_id,
-                    st.session_state.azure_client_secret,
-                    st.session_state.azure_tenant_id
-                )
-                
-                with st.spinner("Looking up Teams user ID..."):
-                    # Authenticate
-                    if not client.authenticate():
-                        st.error("Failed to authenticate with Microsoft Graph API")
-                    else:
-                        # Look up user ID by email
-                        user_id = client.get_user_id_by_email(lookup_email)
-                        
-                        if user_id:
-                            st.session_state.designer_teams_id_mapping[lookup_designer] = user_id
-                            st.success(f"Found Teams ID for {lookup_designer}!")
-                        else:
-                            st.error(f"Could not find Teams user with email {lookup_email}. This might be because your app doesn't have User.Read.All permission.")
-                            st.info("You'll need to manually add the designer's Teams ID.")
         
         # Manual mapping
         st.markdown("#### Manual Mapping")
@@ -281,14 +266,14 @@ def render_teams_direct_messaging_ui():
                         st.experimental_rerun()
         
         # Test message section
-        st.markdown("### Test Direct Message")
+        st.markdown("### Test Notification")
         test_designer = st.selectbox(
             "Select Designer to Test", 
             options=list(st.session_state.designer_teams_id_mapping.keys()) if st.session_state.designer_teams_id_mapping else ["No designers mapped"],
             key="teams_direct_msg_test_designer"
         )
         
-        if st.button("Send Test Message"):
+        if st.button("Send Test Notification"):
             if not st.session_state.designer_teams_id_mapping:
                 st.error("Please add at least one designer Teams ID mapping")
             elif not (st.session_state.azure_client_id and st.session_state.azure_client_secret and st.session_state.azure_tenant_id):
@@ -298,13 +283,6 @@ def render_teams_direct_messaging_ui():
             else:
                 # Get test designer Teams ID
                 teams_id = st.session_state.designer_teams_id_mapping.get(test_designer)
-                
-                # Create Teams client for testing
-                client = TeamsDirectMessaging(
-                    st.session_state.azure_client_id,
-                    st.session_state.azure_client_secret,
-                    st.session_state.azure_tenant_id
-                )
                 
                 # Create test task
                 test_task = [{
@@ -318,92 +296,19 @@ def render_teams_direct_messaging_ui():
                     "Client Success Member": "Test Manager"
                 }]
                 
-                with st.spinner("Sending test message..."):
-                    # Send the test message
-                    message_sent = send_teams_direct_message(
+                with st.spinner("Sending test notification..."):
+                    # Send the test notification
+                    notification_sent = send_designer_notification(
                         test_designer,
                         teams_id,
-                        test_task,
-                        client
+                        test_task
                     )
                     
-                    if message_sent:
-                        st.success(f"Test message sent to {test_designer}")
+                    if notification_sent:
+                        st.success(f"Notification sent to {test_designer}! Check your Teams app.")
                     else:
-                        st.error(f"Failed to send test message to {test_designer}")
-def send_teams_direct_message(
-        designer_name: str,
-        designer_teams_id: str,
-        tasks: list,
-        teams_client: TeamsDirectMessaging
-    ):
-    """
-    Send a direct message to a designer in Teams about missing timesheet entries
-    """
-    try:
-        # Add detailed debug logs
-        logger.info(f"Attempting to send message to {designer_name} with ID {designer_teams_id}")
-        
-        # Test authentication first
-        logger.info("Authenticating with Microsoft Graph API...")
-        if not teams_client.authenticate():
-            logger.error("Authentication failed with Microsoft Graph API")
-            return False
-        
-        logger.info("Authentication successful, token acquired")
-        
-        # Try to create a chat
-        logger.info(f"Attempting to create chat with user ID: {designer_teams_id}")
-        chat_id = teams_client.create_chat(designer_teams_id)
-            
-        if not chat_id:
-            logger.error(f"Failed to create chat with user {designer_name}")
-            return False
-            
-        logger.info(f"Successfully created/found chat with ID: {chat_id}")
-        
-        # Format message information - we'll send this as separate messages
-        # to avoid potential HTML formatting issues
-        max_days_overdue = max(t.get("Days Overdue", 0) for t in tasks)
-        one_day = (max_days_overdue == 1)
-        
-        # First message - introduction
-        if one_day:
-            intro = f"🟠 Quick Nudge – Log Your Hours\n\nHi {designer_name},\n\nThis is a gentle reminder to log your hours for the tasks below — it only takes a minute:"
-        else:
-            intro = f"🔴 Heads-Up: You've Missed Logging Hours for 2 Days\n\nHi {designer_name},\n\nIt looks like no hours have been logged for the past two days for the task(s) below:"
-            
-        # Send intro message
-        if not teams_client.send_direct_message(chat_id, intro):
-            logger.warning("Failed to send intro message, but continuing with task details")
-        
-        # Second message - tasks list
-        tasks_text = ""
-        for i, t in enumerate(tasks, 1):
-            tasks_text += f"{i}. Project: {t.get('Project', 'Unknown')}, Task: {t.get('Task', 'Unknown')}, Date: {t.get('Date', '—')}, CS Contact: {t.get('Client Success Member', 'Unknown')}\n\n"
-        
-        # Send tasks list
-        if not teams_client.send_direct_message(chat_id, tasks_text):
-            logger.warning("Failed to send tasks list, but continuing with footer")
-        
-        # Third message - footer
-        if one_day:
-            footer = "Taking a minute now helps us stay on top of things later 🙌\nLet us know if you need any support with this.\n\n— Automated notice from the Missing Timesheet Reporter"
-        else:
-            footer = "We completely understand things can get busy — but consistent time logging helps us improve project planning and smooth reporting.\nIf something's holding you back from logging your hours, just reach out. We're here to help.\n\n— Automated notice from the Missing Timesheet Reporter"
-        
-        # Send footer message
-        if not teams_client.send_direct_message(chat_id, footer):
-            logger.warning("Failed to send footer message")
-        
-        # If we got this far, consider it a success even if some parts failed
-        return True
+                        st.error(f"Failed to send notification to {test_designer}")
 
-    except Exception as exc:
-        logger.error(f"send_teams_direct_message failed: {exc}", exc_info=True)
-        # Log the full exception traceback for debugging
-        logger.error(traceback.format_exc())
-        return False
     
 def send_designer_teams_direct_messages(designers, selected_date):
     """Send Teams direct messages to designers with missing timesheets"""
@@ -415,18 +320,6 @@ def send_designer_teams_direct_messages(designers, selected_date):
         logger.error("Azure AD credentials not configured")
         return False, 0, 0
     
-    # Create Teams client
-    teams_client = TeamsDirectMessaging(
-        st.session_state.azure_client_id,
-        st.session_state.azure_client_secret,
-        st.session_state.azure_tenant_id
-    )
-    
-    # Authenticate with Microsoft Graph API using application permissions
-    if not teams_client.authenticate():
-        logger.error("Failed to authenticate with Microsoft Graph API")
-        return False, 0, 0
-    
     success_count = 0
     fail_count = 0
     
@@ -436,12 +329,11 @@ def send_designer_teams_direct_messages(designers, selected_date):
         if designer in st.session_state.designer_teams_id_mapping:
             designer_teams_id = st.session_state.designer_teams_id_mapping[designer]
             
-            # Send the direct message
-            message_sent = send_teams_direct_message(
+            # Send the notification
+            message_sent = send_designer_notification(
                 designer,
                 designer_teams_id,
-                tasks,
-                teams_client
+                tasks
             )
             
             if message_sent:
