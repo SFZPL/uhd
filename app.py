@@ -146,7 +146,7 @@ def send_designer_notification(designer_name, designer_teams_id, tasks):
     max_days_overdue = max(t.get("Days Overdue", 0) for t in tasks)
     one_day = (max_days_overdue == 1)
     
-    message = f"Missing Timesheet Alert\n\n"
+    message = f"{'🟠' if one_day else '🔴'} Missing Timesheet Alert\n\n"
     message += f"Hi {designer_name},\n\n"
     
     if one_day:
@@ -161,12 +161,18 @@ def send_designer_notification(designer_name, designer_teams_id, tasks):
         message += f"   Date: {t.get('Date', '—')}\n\n"
     
     # Add footer
+    if one_day:
+        message += "Taking a minute now helps us stay on top of things later 🙌\n"
+        message += "Let us know if you need any support with this.\n\n"
+    else:
+        message += "We completely understand things can get busy — but consistent time logging "
+        message += "helps us improve project planning and smooth reporting.\n"
+        message += "If something's holding you back from logging your hours, just reach out. We're here to help.\n\n"
+    
     message += "— Automated notice from the Missing Timesheet Reporter"
     
     # Send notification
-    result = messenger.notify_user(designer_teams_id, message)
-    
-    return result
+    return messenger.notify_user(designer_teams_id, message)
 
 def render_teams_direct_messaging_ui():
     """Render the UI for Teams direct messaging configuration"""
@@ -222,13 +228,6 @@ def render_teams_direct_messaging_ui():
                             st.success("✅ Authentication successful!")
                         else:
                             st.error("❌ Authentication failed!")
-                            
-                        # Show debug messages
-                        for msg in messenger.debug_messages:
-                            if msg["is_error"]:
-                                st.error(msg["message"])
-                            else:
-                                st.info(msg["message"])
                 except Exception as e:
                     st.error(f"Error testing authentication: {str(e)}")
         
@@ -266,15 +265,15 @@ def render_teams_direct_messaging_ui():
                         del st.session_state.designer_teams_id_mapping[designer]
                         st.experimental_rerun()
         
-        # Test message section with debugging
-        st.markdown("### Debug Message Sending")
+        # Test message section
+        st.markdown("### Test Notification")
         test_designer = st.selectbox(
             "Select Designer to Test", 
             options=list(st.session_state.designer_teams_id_mapping.keys()) if st.session_state.designer_teams_id_mapping else ["No designers mapped"],
             key="teams_direct_msg_test_designer"
         )
         
-        if st.button("Debug Message Sending"):
+        if st.button("Send Test Notification"):
             if not st.session_state.designer_teams_id_mapping:
                 st.error("Please add at least one designer Teams ID mapping")
             elif not (st.session_state.azure_client_id and st.session_state.azure_client_secret and st.session_state.azure_tenant_id):
@@ -285,33 +284,30 @@ def render_teams_direct_messaging_ui():
                 # Get test designer Teams ID
                 teams_id = st.session_state.designer_teams_id_mapping.get(test_designer)
                 
-                # Create messenger for testing
-                messenger = TeamsMessenger(
-                    st.session_state.azure_client_id,
-                    st.session_state.azure_client_secret,
-                    st.session_state.azure_tenant_id
-                )
+                # Create test task
+                test_task = [{
+                    "Project": "Test Project",
+                    "Task": "Test Task",
+                    "Start Time": "09:00",
+                    "End Time": "17:00",
+                    "Allocated Hours": 8.0,
+                    "Date": time.strftime("%Y-%m-%d"),
+                    "Days Overdue": 1,
+                    "Client Success Member": "Test Manager"
+                }]
                 
-                with st.spinner("Testing message sending..."):
-                    # Simple test message
-                    test_message = f"Test message for {test_designer} at {time.strftime('%H:%M:%S')}"
-                    
+                with st.spinner("Sending test notification..."):
                     # Send test notification
-                    result = messenger.notify_user(teams_id, test_message)
+                    notification_sent = send_designer_notification(
+                        test_designer,
+                        teams_id,
+                        test_task
+                    )
                     
-                    # Display result
-                    if result:
-                        st.success(f"Message sending succeeded for {test_designer}")
+                    if notification_sent:
+                        st.success(f"Notification sent to {test_designer}! Check your Teams app.")
                     else:
-                        st.error(f"Message sending failed for {test_designer}")
-                    
-                    # Always show debug info directly in UI
-                    st.write("### Debug Information")
-                    for msg in messenger.debug_messages:
-                        if msg["is_error"]:
-                            st.error(msg["message"])
-                        else:
-                            st.write(msg["message"])
+                        st.error(f"Failed to send notification to {test_designer}")
 def send_designer_teams_direct_messages(designers, selected_date):
     """Send Teams direct messages to designers with missing timesheets"""
     if not st.session_state.teams_direct_msg_enabled:
