@@ -65,13 +65,19 @@ class TeamsMessenger:
                     "@odata.type": "#microsoft.graph.aadUserConversationMember",
                     "roles": ["owner"],
                     "user@odata.bind": f"https://graph.microsoft.com/v1.0/users/{user_id}"
+                },
+                {
+                    "@odata.type": "#microsoft.graph.aadServiceConversationMember",
+                    "roles": ["owner"],
+                    "user@odata.bind": "https://graph.microsoft.com/v1.0/servicePrincipals/3cb693da-c503-4a0c-afba-0408f28d77b6"
                 }
             ]
         }
+
         
         try:
             # Create the chat 
-            url = "https://graph.microsoft.com/beta/chats"  # Using beta endpoint for better compatibility
+            url = "https://graph.microsoft.com/v1.0/chats"  # Using beta endpoint for better compatibility
             logger.info(f"Creating chat for user ID: {user_id}")
             
             response = requests.post(url, headers=headers, json=chat_data)
@@ -122,7 +128,7 @@ class TeamsMessenger:
             }
             
             # Send message with beta endpoint
-            message_url = f"https://graph.microsoft.com/beta/chats/{chat_id}/messages"
+            message_url = f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages"
             
             # Try a few times with increasing delays
             for attempt in range(1, 4):
