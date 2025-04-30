@@ -136,10 +136,6 @@ if hasattr(st.secrets, "EMAIL"):
 def render_teams_direct_messaging_ui():
     """Render the UI for Teams direct messaging configuration"""
     with st.sidebar.expander("Teams Direct Messaging", expanded=False):
-        # ── Obtain / refresh a delegated Graph token ───────────────────
-        if "graph_token" not in st.session_state:
-            st.session_state.graph_token = get_graph_token()
-
         st.session_state.teams_direct_msg_enabled = st.checkbox(
             "Enable Teams Direct Messages", 
             value=st.session_state.teams_direct_msg_enabled,
@@ -170,141 +166,54 @@ def render_teams_direct_messaging_ui():
             type="password",
             help="Tenant ID of your Azure AD"
         )
-        # Add debug button after Azure credentials
-        if st.button("Run Comprehensive Diagnostics", key="debug_comprehensive"):
-            try:
-                # Create Teams client 
-                teams_client = TeamsDirectMessaging(
+        
+        # Add diagnostic button
+        if st.button("Test Configuration", key="test_teams_config"):
+            if not (st.session_state.azure_client_id and st.session_state.azure_client_secret and st.session_state.azure_tenant_id):
+                st.error("Please configure Azure AD credentials first")
+            else:
+                try:
+                    # Create Teams client
+                    client = TeamsDirectMessaging(
                         st.session_state.azure_client_id,
                         st.session_state.azure_client_secret,
-                        st.session_state.azure_tenant_id,
-                        access_token=st.session_state.graph_token      # ← pass delegated token
-                )
+                        st.session_state.azure_tenant_id
+                    )
                     
-                # Test authentication
-                with st.spinner("Testing authentication..."):
-                    auth_result = teams_client.authenticate()
-                    if auth_result:
-                        st.success("✅ Authentication successful!")
-                        
-                        # Analyze token (without JWT library)
-                        token = teams_client.access_token
-                        token_parts = token.split('.')
-                        if len(token_parts) >= 2:
-                            # Base64 decode the payload
-                            import base64
-                            # Fix padding
-                            payload = token_parts[1]
-                            payload += '=' * (4 - len(payload) % 4) if len(payload) % 4 != 0 else ''
+                    # Test authentication
+                    with st.spinner("Testing authentication..."):
+                        auth_result = client.authenticate()
+                        if auth_result:
+                            st.success("✅ Authentication successful!")
                             
-                            try:
-                                decoded = base64.b64decode(payload)
-                                token_data = json.loads(decoded)
-                                
-                                # Display token data
-                                st.subheader("Token Information")
-                                st.write(f"App ID: {token_data.get('appid')}")
-                                st.write(f"Audience: {token_data.get('aud')}")
-                                st.write(f"Tenant ID: {token_data.get('tid')}")
-                                
-                                # Display roles/scopes
-                                if 'roles' in token_data:
-                                    st.write("Permissions granted:")
-                                    for role in token_data['roles']:
-                                        st.write(f"- {role}")
-                                else:
-                                    st.warning("No roles found in token")
-                                    
-                                if 'scp' in token_data:
-                                    st.write("Scopes granted:")
-                                    st.write(token_data['scp'])
-                            except Exception as e:
-                                st.error(f"Error decoding token: {str(e)}")
-                        
-                        # Test specific user ID if available
-                        user_id_to_test = None
-                        if st.session_state.designer_teams_id_mapping:
-                            designer, user_id_to_test = list(st.session_state.designer_teams_id_mapping.items())[0]
-                            st.subheader(f"Testing access to user: {designer}")
-                            
-                            # Check if user exists
-                            user_result, user_error = teams_client.check_user_exists(user_id_to_test)
-                            if user_result:
-                                st.success(f"✅ User exists: {user_result.get('displayName')}")
-                                st.json(user_result)
+                            # Test organization access
+                            org_result, org_error = client.test_organization_access()
+                            if org_result:
+                                st.success("✅ Can access organization information")
                             else:
-                                st.error(f"❌ User check failed: {user_error}")
-                        
-                        # Test permissions
-                        st.subheader("Testing Graph API Permissions")
-                        
-                        # Organization access
-                        org_result, org_error = teams_client.test_organization_access()
-                        if org_result:
-                            st.success("✅ Can access organization information")
-                        else:
-                            st.error(f"❌ Organization access failed: {org_error}")
-                        
-                        # Users access
-                        users_result, users_error = teams_client.test_users_access()
-                        if users_result:
-                            st.success("✅ Can list users")
-                            if isinstance(users_result, dict) and 'value' in users_result:
-                                st.write(f"Found {len(users_result['value'])} users")
-                        else:
-                            st.error(f"❌ Users listing failed: {users_error}")
-                        
-                        # Chats access
-                        chats_result, chats_error = teams_client.test_chats_access()
-                        if chats_result:
-                            st.success("✅ Can access chats")
-                            if isinstance(chats_result, dict) and 'value' in chats_result:
-                                st.write(f"Found {len(chats_result['value'])} chats")
-                        else:
-                            st.error(f"❌ Chats access failed: {chats_error}")
-                        
-                        # Test chat creation if we have a user ID
-                        if user_id_to_test:
-                            st.subheader("Testing Chat Creation")
-                            chat_tests = teams_client.test_create_chat_permission(user_id_to_test)
+                                st.error(f"❌ Organization access failed: {org_error}")
                             
-                            # Check standard approach
-                            if chat_tests["standard"]["result"]:
-                                st.success("✅ Standard chat creation works")
-                                st.json(chat_tests["standard"]["result"])
+                            # Test users access
+                            users_result, users_error = client.test_users_access()
+                            if users_result:
+                                st.success("✅ Can list users")
+                                if isinstance(users_result, dict) and 'value' in users_result:
+                                    st.write(f"Found {len(users_result['value'])} users")
                             else:
-                                st.error(f"❌ Standard chat creation failed: {chat_tests['standard']['error']}")
+                                st.error(f"❌ Users listing failed: {users_error}")
                             
-                            # Check alternative approach
-                            if chat_tests["alternative"]["result"]:
-                                st.success("✅ Alternative chat creation works")
-                                st.json(chat_tests["alternative"]["result"])
+                            # Test chats access
+                            chats_result, chats_error = client.test_chats_access()
+                            if chats_result:
+                                st.success("✅ Can access chats")
+                                if isinstance(chats_result, dict) and 'value' in chats_result:
+                                    st.write(f"Found {len(chats_result['value'])} chats")
                             else:
-                                st.error(f"❌ Alternative chat creation failed: {chat_tests['alternative']['error']}")
-                                
-                            # Show detailed guidance based on errors
-                            all_errors = [
-                                chat_tests["standard"]["error"] or "",
-                                chat_tests["alternative"]["error"] or "",
-                                org_error or "",
-                                users_error or "",
-                                chats_error or ""
-                            ]
-                            error_text = "\n".join([e for e in all_errors if e])
-                            
-                            if "Authorization_RequestDenied" in error_text:
-                                st.info("💡 The error contains 'Authorization_RequestDenied' which means your app doesn't have the required permissions or they haven't been properly granted by an admin.")
-                            
-                            if "Invalid audience" in error_text:
-                                st.info("💡 The error contains 'Invalid audience' which means your token is for the wrong tenant or resource.")
-                            
-                            if "MailboxNotEnabledForRESTAPI" in error_text:
-                                st.info("💡 The error contains 'MailboxNotEnabledForRESTAPI' which means the user's mailbox doesn't support the REST API needed for chat operations.")
-                    else:
-                        st.error("❌ Authentication failed!")
-            except Exception as e:
-                st.error(f"Diagnostic error: {str(e)}")
-                st.code(traceback.format_exc())
+                                st.error(f"❌ Chats access failed: {chats_error}")
+                        else:
+                            st.error("❌ Authentication failed!")
+                except Exception as e:
+                    st.error(f"Error testing configuration: {str(e)}")
         
         # Designer to Teams ID mapping
         st.markdown("### Designer Teams User ID Mapping")
@@ -331,22 +240,20 @@ def render_teams_direct_messaging_ui():
             elif not (lookup_designer and lookup_email):
                 st.error("Please enter both designer name and email address")
             else:
-                # Create Teams client if not already created
-                if not st.session_state.teams_client:
-                    st.session_state.teams_client = TeamsDirectMessaging(
-                        st.session_state.azure_client_id,
-                        st.session_state.azure_client_secret,
-                        st.session_state.azure_tenant_id,
-                        access_token=st.session_state.graph_token
-                    )
+                # Create Teams client for lookup
+                client = TeamsDirectMessaging(
+                    st.session_state.azure_client_id,
+                    st.session_state.azure_client_secret,
+                    st.session_state.azure_tenant_id
+                )
                 
                 with st.spinner("Looking up Teams user ID..."):
-                    # Authenticate if needed
-                    if not st.session_state.teams_client.authenticate():
+                    # Authenticate
+                    if not client.authenticate():
                         st.error("Failed to authenticate with Microsoft Graph API")
                     else:
                         # Look up user ID by email
-                        user_id = st.session_state.teams_client.get_user_id_by_email(lookup_email)
+                        user_id = client.get_user_id_by_email(lookup_email)
                         
                         if user_id:
                             st.session_state.designer_teams_id_mapping[lookup_designer] = user_id
@@ -384,48 +291,13 @@ def render_teams_direct_messaging_ui():
                     if st.button("Remove", key=f"remove_teams_{idx}"):
                         del st.session_state.designer_teams_id_mapping[designer]
                         st.experimental_rerun()
-            
-            # Import/export options
-            st.markdown("### Import/Export Mappings")
-            
-            # Export button
-            if st.button("Export Mappings to CSV"):
-                mapping_df = pd.DataFrame({
-                    'Designer': list(st.session_state.designer_teams_id_mapping.keys()),
-                    'TeamsID': list(st.session_state.designer_teams_id_mapping.values())
-                })
-                csv = mapping_df.to_csv(index=False)
-                st.download_button(
-                    label="Download CSV",
-                    data=csv,
-                    file_name="teams_id_mappings.csv",
-                    mime="text/csv"
-                )
-            
-            # Import from CSV
-            uploaded_file = st.file_uploader("Upload CSV with Teams ID mappings", type="csv")
-            if uploaded_file is not None:
-                try:
-                    df = pd.read_csv(uploaded_file)
-                    if 'Designer' in df.columns and 'TeamsID' in df.columns:
-                        for _, row in df.iterrows():
-                            designer = row['Designer']
-                            teams_id = row['TeamsID']
-                            if designer and teams_id:
-                                st.session_state.designer_teams_id_mapping[designer] = teams_id
-                        st.success(f"Imported {len(df)} Teams ID mappings")
-                    else:
-                        st.error("CSV must have 'Designer' and 'TeamsID' columns")
-                except Exception as e:
-                    st.error(f"Error importing mappings: {e}")
         
-        # Test button
+        # Test message section
         st.markdown("### Test Direct Message")
-        
         test_designer = st.selectbox(
             "Select Designer to Test", 
             options=list(st.session_state.designer_teams_id_mapping.keys()) if st.session_state.designer_teams_id_mapping else ["No designers mapped"],
-            key="teams_direct_msg_test_designer"  # Added unique key
+            key="teams_direct_msg_test_designer"
         )
         
         if st.button("Send Test Message"):
@@ -437,16 +309,14 @@ def render_teams_direct_messaging_ui():
                 # Get test designer Teams ID
                 teams_id = st.session_state.designer_teams_id_mapping.get(test_designer)
                 
-                # Create Teams client if not already created
-                if not st.session_state.teams_client:
-                    st.session_state.teams_client = TeamsDirectMessaging(
-                        st.session_state.azure_client_id,
-                        st.session_state.azure_client_secret,
-                        st.session_state.azure_tenant_id,
-                        access_token=st.session_state.graph_token
-                    )
+                # Create Teams client for testing
+                client = TeamsDirectMessaging(
+                    st.session_state.azure_client_id,
+                    st.session_state.azure_client_secret,
+                    st.session_state.azure_tenant_id
+                )
                 
-                # Create test task for message
+                # Create test task
                 test_task = [{
                     "Project": "Test Project",
                     "Task": "Test Task",
@@ -458,70 +328,19 @@ def render_teams_direct_messaging_ui():
                     "Client Success Member": "Test Manager"
                 }]
                 
-                # Inside the "Send Test Message" button handler:
                 with st.spinner("Sending test message..."):
-                    # Show debug info
-                    st.write(f"Using user ID: {teams_id}")
+                    # Send the test message
+                    message_sent = send_teams_direct_message(
+                        test_designer,
+                        teams_id,
+                        test_task,
+                        client
+                    )
                     
-                    # Create a basic test message content
-                    simple_message = f"""
-                    <h2>Test Message</h2>
-                    <p>Hello {test_designer},</p>
-                    <p>This is a test message from the Missing Timesheet Reporter.</p>
-                    """
-                    
-                    # First try the standard method
-                    st.write("Attempting to create chat with standard method...")
-                    chat_id = st.session_state.teams_client.create_chat(teams_id)
-                    
-                    # If that fails, try the alternative method
-                    if not chat_id:
-                        st.write("Standard method failed, trying alternative method...")
-                        chat_id = st.session_state.teams_client.create_direct_chat_alternative(teams_id)
-                    
-                    if not chat_id:
-                        st.error("Failed to create chat with both methods")
-                        # Get tenant info to help debug
-                        try:
-                            headers = {
-                                "Authorization": f"Bearer {st.session_state.teams_client.access_token}",
-                                "Content-Type": "application/json"
-                            }
-                            tenant_response = requests.get(
-                                "https://graph.microsoft.com/v1.0/organization",
-                                headers=headers
-                            )
-                            st.write(f"App tenant info status: {tenant_response.status_code}")
-                            if tenant_response.status_code == 200:
-                                tenant_info = tenant_response.json()
-                                if 'value' in tenant_info and len(tenant_info['value']) > 0:
-                                    st.write(f"App tenant ID: {tenant_info['value'][0].get('id')}")
-                        except Exception as e:
-                            st.error(f"Error getting tenant info: {str(e)}")
+                    if message_sent:
+                        st.success(f"Test message sent to {test_designer}")
                     else:
-                        st.write(f"✅ Chat created with ID: {chat_id[:10]}..." if chat_id and len(chat_id) > 10 else chat_id)
-                        
-                        # Now try to send a message
-                        message_sent = st.session_state.teams_client.send_direct_message(
-                            chat_id, 
-                            simple_message
-                        )
-                        
-                        if message_sent:
-                            st.success(f"Test message sent to {test_designer}")
-                        else:
-                            st.error("Failed to send message to chat")
-                            
-                            # Try full message anyway in case simple message was too simple
-                            success = send_teams_direct_message(
-                                test_designer,
-                                teams_id,
-                                test_task,
-                                st.session_state.teams_client
-                            )
-                            
-                            if success:
-                                st.success(f"Full test message sent to {test_designer}")
+                        st.error(f"Failed to send test message to {test_designer}")
 def send_teams_direct_message(
         designer_name: str,
         designer_teams_id: str,
@@ -534,10 +353,9 @@ def send_teams_direct_message(
     try:
         # Add detailed debug logs
         logger.info(f"Attempting to send message to {designer_name} with ID {designer_teams_id}")
-        logger.info(f"Teams client initialized with tenant: {teams_client.tenant_id[:5]}...{teams_client.tenant_id[-5:]}")
         
         # Test authentication first
-        logger.info("Attempting authentication with Microsoft Graph API...")
+        logger.info("Authenticating with Microsoft Graph API...")
         if not teams_client.authenticate():
             logger.error("Authentication failed with Microsoft Graph API")
             return False
@@ -547,17 +365,22 @@ def send_teams_direct_message(
         # Try to create a chat
         logger.info(f"Attempting to create chat with user ID: {designer_teams_id}")
         chat_id = teams_client.create_chat(designer_teams_id)
+        
+        # If the first method fails, try the alternative method
+        if not chat_id:
+            logger.info("First method failed, trying alternative chat creation...")
+            chat_id = teams_client.create_direct_chat_alternative(designer_teams_id)
+            
         if not chat_id:
             logger.error(f"Failed to create chat with user {designer_name}")
             return False
             
-        logger.info(f"Successfully created chat with ID: {chat_id}")
+        logger.info(f"Successfully created/found chat with ID: {chat_id}")
         
         # Format message based on urgency
         max_days_overdue = max(t.get("Days Overdue", 0) for t in tasks)
         one_day = (max_days_overdue == 1)
-        two_plus = (max_days_overdue >= 2)
-
+        
         # Format title based on urgency
         if one_day:
             title = "Quick Nudge – Log Your Hours"
@@ -601,7 +424,7 @@ def send_teams_direct_message(
         <p style='font-size: 12px; color: gray;'>— Automated notice from the Missing Timesheet Reporter</p>
         """
 
-        # Log the message content length (to check if it's too large)
+        # Log the message content length
         logger.info(f"Message HTML length: {len(message_html)} characters")
         
         # Send message to chat
@@ -633,14 +456,14 @@ def send_designer_teams_direct_messages(designers, selected_date):
     
     # Create Teams client if not already created
     if not st.session_state.teams_client:
+        # Note: We're not using delegated token anymore since we're using application permissions
         st.session_state.teams_client = TeamsDirectMessaging(
             st.session_state.azure_client_id,
             st.session_state.azure_client_secret,
-            st.session_state.azure_tenant_id,
-            access_token=st.session_state.graph_token
+            st.session_state.azure_tenant_id
         )
     
-    # Authenticate with Microsoft Graph API
+    # Authenticate with Microsoft Graph API using application permissions
     if not st.session_state.teams_client.authenticate():
         logger.error("Failed to authenticate with Microsoft Graph API")
         return False, 0, 0
