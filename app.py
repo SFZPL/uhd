@@ -15,7 +15,6 @@ import os
 import json
 import msal  # You'll need to pip install msal
 from teams_direct_messaging import TeamsDirectMessaging
-from delegated_token import get_graph_token
 
 
 # Configure logging
