@@ -37,9 +37,9 @@ class TeamsMessenger:
     
     def notify_user(self, user_id, message_text):
         """
-        Send a notification to a user using a different approach:
-        1. Create a group chat with the user
-        2. Use a welcome message as part of chat creation
+        Send a notification to a user
+        1. First create a chat without a welcome message 
+        2. Then explicitly send a message to that chat
         """
         if not self.access_token and not self.authenticate():
             logger.error("Failed to authenticate")
@@ -50,11 +50,13 @@ class TeamsMessenger:
             "Content-Type": "application/json"
         }
         
+        # CREATE CHAT FIRST
+        
         # Create a unique chat topic with timestamp
         timestamp = int(time.time())
         chat_topic = f"Missing Timesheet Alert {timestamp}"
         
-        # Create a chat with a welcome message (this is more likely to work)
+        # Create a chat WITHOUT a welcome message
         chat_data = {
             "chatType": "group",
             "topic": chat_topic,
@@ -64,122 +66,138 @@ class TeamsMessenger:
                     "roles": ["owner"],
                     "user@odata.bind": f"https://graph.microsoft.com/v1.0/users/{user_id}"
                 }
-            ],
-            "welcomeMessage": {
-                "content": message_text
-            }
+            ]
         }
         
         try:
-            # Create the chat with welcome message
-            url = "https://graph.microsoft.com/v1.0/chats"
-            logger.info(f"Creating chat with welcome message for user ID: {user_id}")
+            # Create the chat 
+            url = "https://graph.microsoft.com/beta/chats"  # Using beta endpoint for better compatibility
+            logger.info(f"Creating chat for user ID: {user_id}")
             
             response = requests.post(url, headers=headers, json=chat_data)
             logger.info(f"Create chat response: {response.status_code}")
             
+            chat_id = None
+            
             if response.status_code in [200, 201]:
-                logger.info("Successfully created chat with welcome message")
-                return True
+                chat_info = response.json()
+                chat_id = chat_info.get("id")
+                logger.info(f"Successfully created chat with ID: {chat_id}")
             elif response.status_code == 409:  # Chat already exists
-                logger.info("Chat already exists, trying another approach")
-                return self._try_alternative_message_approach(user_id, message_text)
+                logger.info("Chat already exists, trying to extract ID from error message")
+                try:
+                    error_data = response.json()
+                    error_message = error_data.get("error", {}).get("message", "")
+                    
+                    # Try to extract chat ID from error message
+                    if "'" in error_message:
+                        import re
+                        match = re.search(r"'([^']+)'", error_message)
+                        if match:
+                            chat_id = match.group(1)
+                            logger.info(f"Extracted existing chat ID from error: {chat_id}")
+                except Exception as e:
+                    logger.error(f"Error parsing conflict response: {e}")
             else:
-                logger.error(f"Failed to create chat: {response.text}")
-                return self._try_alternative_message_approach(user_id, message_text)
-        except Exception as e:
-            logger.error(f"Error creating chat with welcome message: {e}")
-            return self._try_alternative_message_approach(user_id, message_text)
-    
-    def _try_alternative_message_approach(self, user_id, message_text):
-        """Try an alternative approach using a channel-based notification"""
-        if not self.access_token and not self.authenticate():
-            return False
-            
-        headers = {
-            "Authorization": f"Bearer {self.access_token}",
-            "Content-Type": "application/json"
-        }
-        
-        try:
-            # Try using the activity feed notification approach
-            # This is a completely different way to send messages that bypasses 
-            # the normal chat message restrictions
-            notification_data = {
-                "topic": {
-                    "source": "text",
-                    "value": "Missing Timesheet Alert"
-                },
-                "activityType": "timeSheetReminder",
-                "previewText": {
-                    "content": "You have missing timesheet entries"
-                },
-                "recipient": {
-                    "@odata.type": "microsoft.graph.aadUserNotificationRecipient",
-                    "userId": user_id
-                },
-                "templateParameters": [
-                    {
-                        "name": "message",
-                        "value": message_text
-                    }
-                ]
-            }
-            
-            # Use the beta endpoint for notifications
-            url = "https://graph.microsoft.com/beta/teamwork/sendActivityNotification"
-            
-            notification_response = requests.post(url, headers=headers, json=notification_data)
-            
-            if notification_response.status_code in [200, 201, 204]:
-                logger.info("Successfully sent activity notification")
-                return True
-            else:
-                logger.error(f"Failed to send activity notification: {notification_response.text}")
-                
-                # As a last resort, try the proactive message approach
-                return self._try_proactive_installation(user_id, message_text)
-        except Exception as e:
-            logger.error(f"Error in alternative message approach: {e}")
-            return False
-    
-    def _try_proactive_installation(self, user_id, message_text):
-        """Try the proactive app installation approach"""
-        if not self.access_token and not self.authenticate():
-            return False
-            
-        headers = {
-            "Authorization": f"Bearer {self.access_token}",
-            "Content-Type": "application/json"
-        }
-        
-        try:
-            # As a last resort, try a completely different approach
-            # Create a team and add the user, then post a message to the team
-            timestamp = int(time.time())
-            team_data = {
-                "displayName": f"Timesheet Alert {timestamp}",
-                "description": "Notifications about missing timesheet entries",
-                "members": [
-                    {
-                        "@odata.type": "#microsoft.graph.aadUserConversationMember",
-                        "roles": ["owner"],
-                        "user@odata.bind": f"https://graph.microsoft.com/v1.0/users/{user_id}"
-                    }
-                ],
-                "visibility": "private"
-            }
-            
-            # Create a team
-            team_url = "https://graph.microsoft.com/v1.0/teams"
-            team_response = requests.post(team_url, headers=headers, json=team_data)
-            
-            if team_response.status_code in [200, 201, 202]:
-                logger.info("Team created successfully, will attempt to send message")
-                return True
-            else:
-                logger.error(f"Failed to create team: {team_response.text}")
+                logger.error(f"Failed to create chat: {response.status_code} {response.text}")
                 return False
+            
+            # If no chat ID, return failure
+            if not chat_id:
+                logger.error("Failed to get a valid chat ID")
+                return False
+                
+            # SEND MESSAGE TO CHAT
+            
+            # Delay to ensure chat is ready (important!)
+            logger.info("Waiting 8 seconds for chat to fully initialize...")
+            time.sleep(8)  # Increased delay for better reliability
+            
+            # Prepare a simple message
+            message_data = {
+                "body": {
+                    "contentType": "text",
+                    "content": message_text
+                }
+            }
+            
+            # Send message with beta endpoint
+            message_url = f"https://graph.microsoft.com/beta/chats/{chat_id}/messages"
+            
+            # Try a few times with increasing delays
+            for attempt in range(1, 4):
+                message_response = requests.post(message_url, headers=headers, json=message_data)
+                logger.info(f"Message response (attempt {attempt}): {message_response.status_code}")
+                
+                if message_response.status_code in [200, 201]:
+                    logger.info("Message sent successfully!")
+                    return True
+                else:
+                    logger.warning(f"Message sending failed on attempt {attempt}: {message_response.text}")
+                    
+                    # Only add extra delay if this isn't the last attempt
+                    if attempt < 3:
+                        wait_time = attempt * 3  # 3, 6 seconds
+                        logger.info(f"Waiting {wait_time} seconds before retrying...")
+                        time.sleep(wait_time)
+            
+            # If we get here, all attempts failed
+            logger.error("All message sending attempts failed")
+            
+            # Try a final fallback
+            return self._try_alternative_message_methods(chat_id, message_text)
+                
         except Exception as e:
-            logger.error(f"Error in proactive installation approach: {e}")
+            logger.error(f"Error in notify_user: {e}", exc_info=True)
+            return False
+    
+    def _try_alternative_message_methods(self, chat_id, message_text):
+        """Try alternative message sending methods"""
+        if not self.access_token and not self.authenticate():
+            return False
+            
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        try:
+            # 1. Try using a different message format
+            chat_message = {
+                "body": {
+                    "contentType": "html",
+                    "content": f"<p>{message_text}</p>"
+                }
+            }
+            
+            message_url = f"https://graph.microsoft.com/beta/chats/{chat_id}/messages"
+            
+            html_response = requests.post(message_url, headers=headers, json=chat_message)
+            
+            if html_response.status_code in [200, 201]:
+                logger.info("Message sent successfully using HTML format")
+                return True
+                
+            logger.warning(f"HTML message format failed: {html_response.status_code}")
+            
+            # 2. Try using a very simple plain message
+            simple_message = {
+                "body": {
+                    "content": "Missing Timesheet Alert: Please log your hours."
+                }
+            }
+            
+            simple_response = requests.post(message_url, headers=headers, json=simple_message)
+            
+            if simple_response.status_code in [200, 201]:
+                logger.info("Simple message sent successfully")
+                return True
+                
+            logger.warning(f"Simple message failed: {simple_response.status_code}")
+            
+            # All methods failed
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error in alternative message methods: {e}")
             return False
