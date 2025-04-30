@@ -1,27 +1,20 @@
+
 import requests
 import json
-import logging
 import msal
 import time
-import traceback
 import base64
-
-# Configure extra detailed logging
-logging.basicConfig(
-    level=logging.DEBUG,  # Set to DEBUG for maximum detail
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
+import streamlit as st
 
 class TeamsMessenger:
-    """Class focused on debugging Teams messaging issues"""
+    """Simplified class with direct UI debug output"""
     
     def __init__(self, client_id, client_secret, tenant_id):
         self.client_id = client_id
         self.client_secret = client_secret
         self.tenant_id = tenant_id
         self.access_token = None
+        self.debug_messages = []
         
         # Create MSAL application
         self.app = msal.ConfidentialClientApplication(
@@ -30,27 +23,42 @@ class TeamsMessenger:
             authority=f"https://login.microsoftonline.com/{tenant_id}"
         )
         
-        # Print initialization parameters (masking sensitive data)
-        logger.debug(f"Initialized TeamsMessenger with:")
-        logger.debug(f"Client ID: {client_id[:5]}...{client_id[-5:] if len(client_id) > 10 else client_id}")
-        logger.debug(f"Tenant ID: {tenant_id[:5]}...{tenant_id[-5:] if len(tenant_id) > 10 else tenant_id}")
+        self.add_debug("Initialized TeamsMessenger")
+    
+    def add_debug(self, message, is_error=False):
+        """Add a debug message to the internal list"""
+        self.debug_messages.append({"message": message, "is_error": is_error})
+        print(f"DEBUG: {message}")  # Also print to console
     
     def authenticate(self):
-        """Get access token with detailed debugging"""
-        logger.debug("Authenticating with Microsoft Graph API")
+        """Get access token"""
+        self.add_debug("Authenticating with Microsoft Graph API")
         result = self.app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
         
         if "access_token" in result:
             self.access_token = result["access_token"]
+            self.add_debug("Authentication successful!")
+            
+            # Decode token to check permissions
             token_info = self._decode_token(self.access_token)
-            logger.debug(f"Successfully authenticated with token: {self.access_token[:10]}...{self.access_token[-10:] if len(self.access_token) > 20 else self.access_token}")
-            logger.debug(f"Token expires: {result.get('expires_in')} seconds")
-            logger.debug(f"Token scopes: {result.get('scope', 'none specified')}")
-            logger.debug(f"Token app roles: {token_info.get('roles', ['none found'])}")
+            if "roles" in token_info:
+                roles = token_info.get("roles", [])
+                self.add_debug(f"Token roles: {', '.join(roles)}")
+                
+                # Check for required permissions
+                required_permissions = ["Chat.Create", "Chat.ReadWrite.All", "Chat.Read.All"]
+                for perm in required_permissions:
+                    if any(perm in role for role in roles):
+                        self.add_debug(f"✅ Found permission: {perm}")
+                    else:
+                        self.add_debug(f"❌ Missing permission: {perm}", True)
+            else:
+                self.add_debug("No roles found in token", True)
+            
             return True
         else:
-            logger.error(f"Authentication failed: {result.get('error')}")
-            logger.error(f"Error description: {result.get('error_description')}")
+            self.add_debug(f"Authentication failed: {result.get('error')}", True)
+            self.add_debug(f"Error description: {result.get('error_description')}", True)
             return False
     
     def _decode_token(self, token):
@@ -68,40 +76,35 @@ class TeamsMessenger:
             decoded_str = decoded_bytes.decode('utf-8')
             return json.loads(decoded_str)
         except Exception as e:
-            logger.error(f"Error decoding token: {e}")
+            self.add_debug(f"Error decoding token: {e}", True)
             return {"error": str(e)}
     
     def notify_user(self, user_id, message_text):
-        """Create a chat and debug message sending issues"""
+        """Attempt to send a message with detailed debugging"""
         if not self.access_token and not self.authenticate():
-            logger.error("Authentication failed")
+            self.add_debug("Authentication failed", True)
             return False
             
-        # STEP 1: Create the chat
-        chat_id = self._create_chat_for_debug(user_id)
+        # Step 1: Create chat
+        self.add_debug("----- STEP 1: Create Chat -----")
+        chat_id = self._create_chat(user_id)
         if not chat_id:
-            logger.error("Failed to create or get chat ID")
+            self.add_debug("Failed to get a valid chat ID", True)
             return False
-            
-        # STEP 2: Debug chat details
-        chat_details = self._get_chat_details(chat_id)
         
-        # STEP 3: Try different message sending approaches with detailed debugging
-        success = self._debug_send_message(chat_id, message_text)
-        
-        return success
+        # Step 2: Send message with multiple attempts
+        self.add_debug("----- STEP 2: Send Message -----")
+        return self._try_all_message_methods(chat_id, message_text)
     
-    def _create_chat_for_debug(self, user_id):
-        """Create a chat with detailed debugging"""
+    def _create_chat(self, user_id):
+        """Create a chat and return the ID"""
         headers = {
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json"
         }
         
-        # Unique chat name for debugging
-        chat_topic = f"Debug Chat {int(time.time())}"
-        
         # Create chat data
+        chat_topic = f"Chat {int(time.time())}"
         chat_data = {
             "chatType": "group",
             "topic": chat_topic,
@@ -114,231 +117,285 @@ class TeamsMessenger:
             ]
         }
         
-        # Try both v1.0 and beta endpoints
-        endpoints = [
-            "https://graph.microsoft.com/v1.0/chats",
-            "https://graph.microsoft.com/beta/chats"
-        ]
-        
-        logger.debug(f"Attempting to create chat with user ID: {user_id}")
-        logger.debug(f"Chat data: {json.dumps(chat_data)}")
-        
-        for endpoint in endpoints:
-            try:
-                logger.debug(f"Trying endpoint: {endpoint}")
-                response = requests.post(endpoint, headers=headers, json=chat_data)
-                
-                logger.debug(f"Response status: {response.status_code}")
-                logger.debug(f"Response headers: {dict(response.headers)}")
-                
-                try:
-                    response_json = response.json()
-                    logger.debug(f"Response JSON: {json.dumps(response_json)}")
-                except:
-                    logger.debug(f"Response text: {response.text}")
-                
-                if response.status_code in [200, 201]:
-                    # Success
-                    chat_id = response.json().get("id")
-                    logger.debug(f"Successfully created chat with ID: {chat_id}")
-                    return chat_id
-                elif response.status_code == 409:  # Conflict - chat already exists
-                    try:
-                        # Try to extract existing chat ID
-                        error_data = response.json()
-                        error_message = error_data.get("error", {}).get("message", "")
-                        
-                        import re
-                        match = re.search(r"'([^']+)'", error_message)
-                        if match:
-                            chat_id = match.group(1)
-                            logger.debug(f"Found existing chat with ID: {chat_id}")
-                            return chat_id
-                    except Exception as e:
-                        logger.error(f"Error parsing conflict response: {str(e)}")
-                else:
-                    logger.error(f"Failed with status code: {response.status_code}")
-            except Exception as e:
-                logger.error(f"Exception during chat creation: {str(e)}")
-        
-        # Both endpoints failed
-        logger.error("Failed to create chat with either endpoint")
-        return None
-    
-    def _get_chat_details(self, chat_id):
-        """Get detailed information about the chat"""
-        if not chat_id:
-            return None
-            
-        headers = {
-            "Authorization": f"Bearer {self.access_token}",
-            "Content-Type": "application/json"
-        }
-        
-        logger.debug(f"Getting details for chat ID: {chat_id}")
+        self.add_debug(f"Creating chat with topic: {chat_topic}")
         
         try:
-            # Try both endpoints
-            for endpoint in ["https://graph.microsoft.com/v1.0", "https://graph.microsoft.com/beta"]:
-                url = f"{endpoint}/chats/{chat_id}"
-                logger.debug(f"Fetching chat details from: {url}")
-                
-                response = requests.get(url, headers=headers)
-                
-                logger.debug(f"Response status: {response.status_code}")
-                
-                if response.status_code == 200:
-                    chat_details = response.json()
-                    logger.debug(f"Chat details: {json.dumps(chat_details)}")
+            # Try beta endpoint first
+            url = "https://graph.microsoft.com/beta/chats"
+            self.add_debug(f"POST {url}")
+            
+            response = requests.post(url, headers=headers, json=chat_data)
+            self.add_debug(f"Response status: {response.status_code}")
+            
+            # Handle response
+            if response.status_code in [200, 201]:
+                chat_id = response.json().get("id")
+                self.add_debug(f"Chat created successfully with ID: {chat_id}")
+                return chat_id
+            elif response.status_code == 409:  # Conflict - chat already exists
+                try:
+                    # Try to extract existing chat ID
+                    error_data = response.json()
+                    error_message = error_data.get("error", {}).get("message", "")
+                    self.add_debug(f"Chat conflict: {error_message}")
                     
-                    # Also try to get members
-                    members_url = f"{endpoint}/chats/{chat_id}/members"
-                    members_response = requests.get(members_url, headers=headers)
+                    # Extract chat ID from error message
+                    import re
+                    match = re.search(r"'([^']+)'", error_message)
+                    if match:
+                        chat_id = match.group(1)
+                        self.add_debug(f"Found existing chat with ID: {chat_id}")
+                        return chat_id
+                except Exception as e:
+                    self.add_debug(f"Error parsing conflict response: {str(e)}", True)
+            else:
+                self.add_debug(f"Failed to create chat: {response.status_code}", True)
+                try:
+                    error_data = response.json()
+                    error_message = error_data.get("error", {}).get("message", "")
+                    self.add_debug(f"Error message: {error_message}", True)
+                except:
+                    self.add_debug(f"Response: {response.text[:500]}", True)
                     
-                    if members_response.status_code == 200:
-                        members_data = members_response.json()
-                        logger.debug(f"Chat members: {json.dumps(members_data)}")
-                    else:
-                        logger.debug(f"Failed to get chat members: {members_response.status_code}")
-                    
-                    # Also check installed apps
-                    apps_url = f"{endpoint}/chats/{chat_id}/installedApps"
-                    apps_response = requests.get(apps_url, headers=headers)
-                    
-                    if apps_response.status_code == 200:
-                        apps_data = apps_response.json()
-                        logger.debug(f"Chat installed apps: {json.dumps(apps_data)}")
-                    else:
-                        logger.debug(f"Failed to get installed apps: {apps_response.status_code}")
-                        
-                    return chat_details
-                else:
-                    logger.debug(f"Failed to get chat details with {endpoint}: {response.status_code}")
         except Exception as e:
-            logger.error(f"Error getting chat details: {str(e)}")
+            self.add_debug(f"Exception creating chat: {str(e)}", True)
+        
+        # If we get here, try v1.0 endpoint
+        try:
+            url = "https://graph.microsoft.com/v1.0/chats"
+            self.add_debug(f"Falling back to v1.0 endpoint: {url}")
+            
+            response = requests.post(url, headers=headers, json=chat_data)
+            self.add_debug(f"v1.0 response status: {response.status_code}")
+            
+            if response.status_code in [200, 201]:
+                chat_id = response.json().get("id")
+                self.add_debug(f"Chat created successfully with v1.0 endpoint: {chat_id}")
+                return chat_id
+            else:
+                self.add_debug(f"Failed to create chat with v1.0 endpoint: {response.status_code}", True)
+        except Exception as e:
+            self.add_debug(f"Exception with v1.0 endpoint: {str(e)}", True)
         
         return None
     
-    def _debug_send_message(self, chat_id, message_text):
-        """Debug message sending with multiple attempts and formats"""
-        if not chat_id:
-            logger.error("Cannot send message - no chat ID provided")
-            return False
-            
+    def _try_all_message_methods(self, chat_id, message_text):
+        """Try all possible message sending methods"""
         headers = {
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json"
         }
         
         # Wait for chat to initialize
-        logger.debug(f"Waiting 10 seconds for chat {chat_id} to initialize...")
-        time.sleep(10)
+        wait_seconds = 10
+        self.add_debug(f"Waiting {wait_seconds} seconds for chat to initialize...")
+        time.sleep(wait_seconds)
         
-        # Define different message formats to try
-        message_formats = [
-            # Plain text format
-            {
-                "body": {
-                    "contentType": "text",
-                    "content": message_text
-                }
-            },
-            # HTML format
-            {
-                "body": {
-                    "contentType": "html",
-                    "content": f"<p>{message_text}</p>"
-                }
-            },
-            # Minimal format
-            {
-                "body": {
-                    "content": "Test message"
-                }
-            },
-            # Alternative format
-            {
-                "content": {
-                    "body": {
-                        "contentType": "text",
-                        "content": "Alternative format test"
-                    }
-                }
-            }
+        # Try each method in sequence
+        methods = [
+            self._try_beta_text_message,
+            self._try_v1_text_message,
+            self._try_beta_html_message,
+            self._try_beta_simple_message,
+            self._try_welcome_message_approach
         ]
         
-        # Try both endpoints
-        endpoints = [
-            "https://graph.microsoft.com/v1.0/chats/{chat_id}/messages",
-            "https://graph.microsoft.com/beta/chats/{chat_id}/messages"
-        ]
-        
-        # Try each combination of endpoint and message format
-        for endpoint_template in endpoints:
-            endpoint = endpoint_template.format(chat_id=chat_id)
-            logger.debug(f"Trying endpoint: {endpoint}")
+        for i, method in enumerate(methods):
+            self.add_debug(f"Attempt {i+1}: Trying {method.__name__}")
+            success = method(chat_id, message_text, headers)
             
-            for i, msg_format in enumerate(message_formats):
-                try:
-                    logger.debug(f"Trying message format {i+1}: {json.dumps(msg_format)}")
-                    
-                    # Wait between attempts
-                    if i > 0:
-                        time.sleep(3)
-                    
-                    response = requests.post(endpoint, headers=headers, json=msg_format)
-                    
-                    logger.debug(f"Response status: {response.status_code}")
-                    logger.debug(f"Response headers: {dict(response.headers)}")
-                    
-                    try:
-                        response_json = response.json()
-                        logger.debug(f"Response JSON: {json.dumps(response_json)}")
-                    except:
-                        logger.debug(f"Response text: {response.text}")
-                    
-                    if response.status_code in [200, 201]:
-                        logger.debug(f"Successfully sent message with format {i+1}")
-                        return True
-                    else:
-                        logger.debug(f"Failed to send message with format {i+1}")
-                        
-                        # Parse error for more details
-                        try:
-                            error_data = response.json()
-                            error_code = error_data.get("error", {}).get("code", "Unknown")
-                            error_message = error_data.get("error", {}).get("message", "Unknown")
-                            logger.debug(f"Error code: {error_code}")
-                            logger.debug(f"Error message: {error_message}")
-                        except:
-                            pass
-                except Exception as e:
-                    logger.error(f"Exception during message send attempt: {str(e)}")
+            if success:
+                self.add_debug(f"✅ {method.__name__} succeeded!")
+                return True
+            
+            self.add_debug(f"❌ {method.__name__} failed")
+            # Wait between attempts
+            if i < len(methods) - 1:
+                time.sleep(3)
         
-        # Try another approach - sending message to beta endpoint with a different payload structure
+        # All methods failed
+        self.add_debug("All message sending methods failed", True)
+        return False
+    
+    def _try_beta_text_message(self, chat_id, message_text, headers):
+        """Try sending a message with beta endpoint, text format"""
+        url = f"https://graph.microsoft.com/beta/chats/{chat_id}/messages"
+        data = {
+            "body": {
+                "contentType": "text",
+                "content": message_text
+            }
+        }
+        
         try:
-            logger.debug("Trying beta endpoint with chatMessage format")
-            beta_url = f"https://graph.microsoft.com/beta/chats/{chat_id}/messages"
-            
-            chat_message = {
-                "@odata.type": "#microsoft.graph.chatMessage",
-                "body": {
-                    "contentType": "text",
-                    "content": "Testing message delivery (special format)"
-                }
-            }
-            
-            response = requests.post(beta_url, headers=headers, json=chat_message)
-            logger.debug(f"Beta special format response: {response.status_code}")
+            self.add_debug(f"POST {url} (Beta Text)")
+            response = requests.post(url, headers=headers, json=data)
+            self.add_debug(f"Response status: {response.status_code}")
             
             if response.status_code in [200, 201]:
-                logger.debug("Successfully sent message with special beta format")
                 return True
+            else:
+                try:
+                    error_data = response.json()
+                    error_code = error_data.get("error", {}).get("code", "Unknown")
+                    error_message = error_data.get("error", {}).get("message", "Unknown") 
+                    self.add_debug(f"Error code: {error_code}", True)
+                    self.add_debug(f"Error message: {error_message}", True)
+                except:
+                    self.add_debug(f"Response: {response.text[:300]}", True)
+                return False
         except Exception as e:
-            logger.error(f"Error with special beta format: {str(e)}")
+            self.add_debug(f"Exception: {str(e)}", True)
+            return False
+    
+    def _try_v1_text_message(self, chat_id, message_text, headers):
+        """Try sending a message with v1.0 endpoint, text format"""
+        url = f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages"
+        data = {
+            "body": {
+                "contentType": "text",
+                "content": message_text
+            }
+        }
         
-        # All approaches failed
-        logger.error("All message sending approaches failed")
-        return False
-
-
+        try:
+            self.add_debug(f"POST {url} (v1.0 Text)")
+            response = requests.post(url, headers=headers, json=data)
+            self.add_debug(f"Response status: {response.status_code}")
+            
+            if response.status_code in [200, 201]:
+                return True
+            else:
+                try:
+                    error_data = response.json()
+                    error_code = error_data.get("error", {}).get("code", "Unknown")
+                    error_message = error_data.get("error", {}).get("message", "Unknown") 
+                    self.add_debug(f"Error code: {error_code}", True)
+                    self.add_debug(f"Error message: {error_message}", True)
+                except:
+                    self.add_debug(f"Response: {response.text[:300]}", True)
+                return False
+        except Exception as e:
+            self.add_debug(f"Exception: {str(e)}", True)
+            return False
+    
+    def _try_beta_html_message(self, chat_id, message_text, headers):
+        """Try sending a message with beta endpoint, HTML format"""
+        url = f"https://graph.microsoft.com/beta/chats/{chat_id}/messages"
+        data = {
+            "body": {
+                "contentType": "html",
+                "content": f"<p>{message_text}</p>"
+            }
+        }
+        
+        try:
+            self.add_debug(f"POST {url} (Beta HTML)")
+            response = requests.post(url, headers=headers, json=data)
+            self.add_debug(f"Response status: {response.status_code}")
+            
+            if response.status_code in [200, 201]:
+                return True
+            else:
+                try:
+                    error_data = response.json()
+                    error_code = error_data.get("error", {}).get("code", "Unknown")
+                    error_message = error_data.get("error", {}).get("message", "Unknown") 
+                    self.add_debug(f"Error code: {error_code}", True)
+                    self.add_debug(f"Error message: {error_message}", True)
+                except:
+                    self.add_debug(f"Response: {response.text[:300]}", True)
+                return False
+        except Exception as e:
+            self.add_debug(f"Exception: {str(e)}", True)
+            return False
+    
+    def _try_beta_simple_message(self, chat_id, message_text, headers):
+        """Try sending a simple message with beta endpoint"""
+        url = f"https://graph.microsoft.com/beta/chats/{chat_id}/messages"
+        data = {
+            "body": {
+                "content": "Simple test message"
+            }
+        }
+        
+        try:
+            self.add_debug(f"POST {url} (Beta Simple)")
+            response = requests.post(url, headers=headers, json=data)
+            self.add_debug(f"Response status: {response.status_code}")
+            
+            if response.status_code in [200, 201]:
+                return True
+            else:
+                try:
+                    error_data = response.json()
+                    error_code = error_data.get("error", {}).get("code", "Unknown")
+                    error_message = error_data.get("error", {}).get("message", "Unknown") 
+                    self.add_debug(f"Error code: {error_code}", True)
+                    self.add_debug(f"Error message: {error_message}", True)
+                except:
+                    self.add_debug(f"Response: {response.text[:300]}", True)
+                return False
+        except Exception as e:
+            self.add_debug(f"Exception: {str(e)}", True)
+            return False
+    
+    def _try_welcome_message_approach(self, chat_id, message_text, headers):
+        """Try creating a new chat with welcome message"""
+        url = "https://graph.microsoft.com/beta/chats"
+        
+        # Extract user ID from existing chat
+        self.add_debug("Trying to get members of existing chat to create welcome message")
+        
+        try:
+            # Get members of existing chat
+            members_url = f"https://graph.microsoft.com/beta/chats/{chat_id}/members"
+            members_response = requests.get(members_url, headers=headers)
+            
+            if members_response.status_code == 200:
+                members_data = members_response.json()
+                
+                # Find the user that's not the app
+                user_id = None
+                for member in members_data.get("value", []):
+                    if member.get("userId"):
+                        user_id = member.get("userId")
+                        self.add_debug(f"Found user ID: {user_id}")
+                        break
+                
+                if user_id:
+                    # Create a new chat with welcome message
+                    chat_data = {
+                        "chatType": "group",
+                        "topic": f"Alert {int(time.time())}",
+                        "members": [
+                            {
+                                "@odata.type": "#microsoft.graph.aadUserConversationMember",
+                                "roles": ["owner"],
+                                "user@odata.bind": f"https://graph.microsoft.com/v1.0/users/{user_id}"
+                            }
+                        ],
+                        "welcomeMessage": {
+                            "content": message_text
+                        }
+                    }
+                    
+                    self.add_debug(f"Creating new chat with welcome message")
+                    response = requests.post(url, headers=headers, json=chat_data)
+                    
+                    self.add_debug(f"Response status: {response.status_code}")
+                    
+                    if response.status_code in [200, 201]:
+                        return True
+                    else:
+                        self.add_debug(f"Failed to create chat with welcome message", True)
+                        return False
+                else:
+                    self.add_debug("Could not find user ID in chat members", True)
+                    return False
+            else:
+                self.add_debug(f"Failed to get chat members: {members_response.status_code}", True)
+                return False
+        except Exception as e:
+            self.add_debug(f"Exception in welcome message approach: {str(e)}", True)
+            return False
