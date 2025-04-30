@@ -142,7 +142,7 @@ def send_designer_notification(designer_name, designer_teams_id, tasks):
         st.session_state.azure_tenant_id
     )
     
-    # Format a simple text message
+    # Format a proper message
     max_days_overdue = max(t.get("Days Overdue", 0) for t in tasks)
     one_day = (max_days_overdue == 1)
     
@@ -158,7 +158,9 @@ def send_designer_notification(designer_name, designer_teams_id, tasks):
     for i, t in enumerate(tasks, 1):
         message += f"{i}. Project: {t.get('Project', 'Unknown')}\n"
         message += f"   Task: {t.get('Task', 'Unknown')}\n"
-        message += f"   Date: {t.get('Date', '—')}\n\n"
+        message += f"   Date: {t.get('Date', '—')}\n"
+        message += f"   Allocated Hours: {t.get('Allocated Hours', '—')}\n"
+        message += f"   CS Contact: {t.get('Client Success Member', 'Unknown')}\n\n"
     
     # Add footer
     if one_day:
@@ -185,7 +187,7 @@ def render_teams_direct_messaging_ui():
         
         # Azure AD App registration details
         st.markdown("### Azure AD App Configuration")
-        st.info("You need to register an app in Azure AD with Microsoft Graph API permissions: Chat.Create, Chat.Read.All, Chat.ReadWrite.All.")
+        st.info("You need to register an app in Azure AD with Microsoft Graph API permissions: Chat.Create, Chat.Read.All, Chat.ReadWrite.All, Teamwork.Migrate.All.")
         
         st.session_state.azure_client_id = st.text_input(
             "Azure AD Client ID",
@@ -266,14 +268,14 @@ def render_teams_direct_messaging_ui():
                         st.experimental_rerun()
         
         # Test message section
-        st.markdown("### Test Notification")
+        st.markdown("### Test Message")
         test_designer = st.selectbox(
             "Select Designer to Test", 
             options=list(st.session_state.designer_teams_id_mapping.keys()) if st.session_state.designer_teams_id_mapping else ["No designers mapped"],
             key="teams_direct_msg_test_designer"
         )
         
-        if st.button("Send Test Notification"):
+        if st.button("Send Test Message"):
             if not st.session_state.designer_teams_id_mapping:
                 st.error("Please add at least one designer Teams ID mapping")
             elif not (st.session_state.azure_client_id and st.session_state.azure_client_secret and st.session_state.azure_tenant_id):
@@ -296,18 +298,18 @@ def render_teams_direct_messaging_ui():
                     "Client Success Member": "Test Manager"
                 }]
                 
-                with st.spinner("Sending test notification..."):
+                with st.spinner("Sending test message..."):
                     # Send test notification
-                    notification_sent = send_designer_notification(
+                    message_sent = send_designer_notification(
                         test_designer,
                         teams_id,
                         test_task
                     )
                     
-                    if notification_sent:
-                        st.success(f"Notification sent to {test_designer}! Check your Teams app.")
+                    if message_sent:
+                        st.success(f"Message sent to {test_designer}! Check your Teams app.")
                     else:
-                        st.error(f"Failed to send notification to {test_designer}")
+                        st.error(f"Failed to send message to {test_designer}")
 def send_designer_teams_direct_messages(designers, selected_date):
     """Send Teams direct messages to designers with missing timesheets"""
     if not st.session_state.teams_direct_msg_enabled:
