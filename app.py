@@ -143,7 +143,7 @@ def render_teams_direct_messaging_ui():
         
         # Azure AD App registration details
         st.markdown("### Azure AD App Configuration")
-        st.info("You need to register an app in Azure AD with Microsoft Graph API permissions.")
+        st.info("You need to register an app in Azure AD with Microsoft Graph API permissions: Chat.Create, Chat.Read.All, Chat.ReadWrite.All.")
         
         st.session_state.azure_client_id = st.text_input(
             "Azure AD Client ID",
@@ -166,8 +166,8 @@ def render_teams_direct_messaging_ui():
             help="Tenant ID of your Azure AD"
         )
         
-        # Add diagnostic button
-        if st.button("Test Configuration", key="test_teams_config"):
+        # Simple authentication test
+        if st.button("Test Authentication"):
             if not (st.session_state.azure_client_id and st.session_state.azure_client_secret and st.session_state.azure_tenant_id):
                 st.error("Please configure Azure AD credentials first")
             else:
@@ -185,34 +185,22 @@ def render_teams_direct_messaging_ui():
                         if auth_result:
                             st.success("✅ Authentication successful!")
                             
-                            # Test organization access
-                            org_result, org_error = client.test_organization_access()
-                            if org_result:
-                                st.success("✅ Can access organization information")
-                            else:
-                                st.error(f"❌ Organization access failed: {org_error}")
-                            
-                            # Test users access
-                            users_result, users_error = client.test_users_access()
-                            if users_result:
-                                st.success("✅ Can list users")
-                                if isinstance(users_result, dict) and 'value' in users_result:
-                                    st.write(f"Found {len(users_result['value'])} users")
-                            else:
-                                st.error(f"❌ Users listing failed: {users_error}")
-                            
-                            # Test chats access
-                            chats_result, chats_error = client.test_chats_access()
-                            if chats_result:
-                                st.success("✅ Can access chats")
-                                if isinstance(chats_result, dict) and 'value' in chats_result:
-                                    st.write(f"Found {len(chats_result['value'])} chats")
-                            else:
-                                st.error(f"❌ Chats access failed: {chats_error}")
+                            # Try to get token info
+                            token_info = client.check_authentication()
+                            if token_info["status"] == "success":
+                                st.subheader("Token Information")
+                                st.write(f"App ID: {token_info.get('app_id')}")
+                                st.write(f"Tenant ID: {token_info.get('tenant_id')}")
+                                
+                                # Show permissions
+                                if 'roles' in token_info and token_info['roles']:
+                                    st.write("Application Permissions:")
+                                    for role in token_info['roles']:
+                                        st.write(f"- {role}")
                         else:
                             st.error("❌ Authentication failed!")
                 except Exception as e:
-                    st.error(f"Error testing configuration: {str(e)}")
+                    st.error(f"Error testing authentication: {str(e)}")
         
         # Designer to Teams ID mapping
         st.markdown("### Designer Teams User ID Mapping")
@@ -222,7 +210,7 @@ def render_teams_direct_messaging_ui():
         You can get user IDs from:
         1. Microsoft Teams admin portal
         2. Using the Microsoft Graph Explorer
-        3. Using email addresses (our app can look up IDs)
+        3. Using email addresses (if your app has User.Read.All permission)
         """)
         
         # Allow mapping via email
@@ -258,7 +246,8 @@ def render_teams_direct_messaging_ui():
                             st.session_state.designer_teams_id_mapping[lookup_designer] = user_id
                             st.success(f"Found Teams ID for {lookup_designer}!")
                         else:
-                            st.error(f"Could not find Teams user with email {lookup_email}")
+                            st.error(f"Could not find Teams user with email {lookup_email}. This might be because your app doesn't have User.Read.All permission.")
+                            st.info("You'll need to manually add the designer's Teams ID.")
         
         # Manual mapping
         st.markdown("#### Manual Mapping")
@@ -304,6 +293,8 @@ def render_teams_direct_messaging_ui():
                 st.error("Please add at least one designer Teams ID mapping")
             elif not (st.session_state.azure_client_id and st.session_state.azure_client_secret and st.session_state.azure_tenant_id):
                 st.error("Please configure Azure AD credentials first")
+            elif test_designer == "No designers mapped":
+                st.error("Please add at least one designer mapping first")
             else:
                 # Get test designer Teams ID
                 teams_id = st.session_state.designer_teams_id_mapping.get(test_designer)
@@ -364,11 +355,6 @@ def send_teams_direct_message(
         # Try to create a chat
         logger.info(f"Attempting to create chat with user ID: {designer_teams_id}")
         chat_id = teams_client.create_chat(designer_teams_id)
-        
-        # If the first method fails, try the alternative method
-        if not chat_id:
-            logger.info("First method failed, trying alternative chat creation...")
-            chat_id = teams_client.create_direct_chat_alternative(designer_teams_id)
             
         if not chat_id:
             logger.error(f"Failed to create chat with user {designer_name}")
@@ -453,17 +439,15 @@ def send_designer_teams_direct_messages(designers, selected_date):
         logger.error("Azure AD credentials not configured")
         return False, 0, 0
     
-    # Create Teams client if not already created
-    if not st.session_state.teams_client:
-        # Note: We're not using delegated token anymore since we're using application permissions
-        st.session_state.teams_client = TeamsDirectMessaging(
-            st.session_state.azure_client_id,
-            st.session_state.azure_client_secret,
-            st.session_state.azure_tenant_id
-        )
+    # Create Teams client
+    teams_client = TeamsDirectMessaging(
+        st.session_state.azure_client_id,
+        st.session_state.azure_client_secret,
+        st.session_state.azure_tenant_id
+    )
     
     # Authenticate with Microsoft Graph API using application permissions
-    if not st.session_state.teams_client.authenticate():
+    if not teams_client.authenticate():
         logger.error("Failed to authenticate with Microsoft Graph API")
         return False, 0, 0
     
@@ -481,7 +465,7 @@ def send_designer_teams_direct_messages(designers, selected_date):
                 designer,
                 designer_teams_id,
                 tasks,
-                st.session_state.teams_client
+                teams_client
             )
             
             if message_sent:
