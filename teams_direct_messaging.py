@@ -5,12 +5,13 @@ import json
 import logging
 import msal
 import traceback
+import time
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
 class TeamsDirectMessaging:
-    """Simplified class to handle Microsoft Teams direct messaging via Graph API"""
+    """Class to handle Microsoft Teams direct messaging via Graph API using application permissions"""
     
     def __init__(self, client_id, client_secret, tenant_id, access_token=None):
         """Initialize with Azure AD credentials"""
@@ -65,62 +66,68 @@ class TeamsDirectMessaging:
             logger.error(f"Error in authentication: {e}")
             logger.error(traceback.format_exc())
             return False
-
+    
     def get_user_id_by_email(self, email):
-        """
-        Get user ID by email using the filter endpoint
-        This works with application permissions if you have User.Read.All
-        
-        If your app doesn't have this permission, 
-        you'll need to manually map emails to IDs
-        """
+        """Get Teams user ID from email address"""
         if not self.access_token:
+            logger.info("No access token found, authenticating first")
             if not self.authenticate():
-                logger.error("Authentication failed")
+                logger.error("Authentication failed before get_user_id_by_email")
                 return None
-                
+        
         headers = {
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json"
         }
         
         try:
-            # Try to find the user by email
-            url = f"https://graph.microsoft.com/v1.0/users?$filter=mail eq '{email}' or userPrincipalName eq '{email}'"
+            url = (
+                "https://graph.microsoft.com/v1.0/users"
+                f"?$filter=mail eq '{email}' or userPrincipalName eq '{email}'"
+            )
+            logger.info(f"Making request to: {url}")
+            
             response = requests.get(url, headers=headers)
             
+            # Log status code and partial response
+            logger.info(f"Response status: {response.status_code}")
+            if response.status_code != 200:
+                logger.error(f"Response text: {response.text[:200]}...")
+            
             if response.status_code == 200:
-                data = response.json()
-                if "value" in data and len(data["value"]) > 0:
-                    user_id = data["value"][0]["id"]
-                    logger.info(f"Found user ID for {email}: {user_id}")
+                user_data = response.json()
+                if "value" in user_data and len(user_data["value"]) > 0:
+                    user_id = user_data["value"][0].get("id")
+                    logger.info(f"Found user ID: {user_id[:5]}...{user_id[-5:]}" if user_id and len(user_id) > 10 else f"Found user ID: {user_id}")
                     return user_id
                 else:
-                    logger.warning(f"No user found with email {email}")
+                    logger.error(f"No users found with email {email}")
                     return None
             else:
-                logger.error(f"Failed to get user by email: {response.status_code} {response.text}")
+                logger.error(f"Failed to get user ID for {email}. Status: {response.status_code}, Response: {response.text}")
                 return None
         except Exception as e:
-            logger.error(f"Error in get_user_id_by_email: {e}")
+            logger.error(f"Error getting user ID: {e}")
+            logger.error(traceback.format_exc())
             return None
-            
+    
     def create_chat(self, user_id):
         """
-        Create a chat with a user
-        This uses the Chat.Create application permission
+        Create a chat with a user using application permissions
+        Returns chat_id or None
         """
         if not self.access_token:
+            logger.info("No access token found, authenticating first")
             if not self.authenticate():
+                logger.error("Authentication failed before create_chat")
                 return None
-                
+        
         headers = {
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json"
         }
         
-        # For application permissions, we need to create a group chat
-        # because one-on-one chats require delegated permissions
+        # Using application permissions we need to create a group chat
         chat_data = {
             "chatType": "group",
             "topic": "Missing Timesheet Notification",
@@ -147,16 +154,17 @@ class TeamsDirectMessaging:
                 data = response.json()
                 chat_id = data.get("id")
                 logger.info(f"Successfully created chat with ID: {chat_id}")
+                
+                # Wait a moment to let the chat be fully created before sending messages
+                time.sleep(2)
                 return chat_id
             elif response.status_code == 409:  # Conflict - chat may already exist
                 try:
                     # Try to get the existing chat ID from the response
                     error_data = response.json()
-                    # Often the chat ID is included in the error response
                     error_message = error_data.get("error", {}).get("message", "")
                     
                     # Try to extract the chat ID from the error message
-                    # Error messages might contain the ID in various formats
                     if "existing chat" in error_message.lower() and "'" in error_message:
                         import re
                         match = re.search(r"'([^']+)'", error_message)
@@ -167,72 +175,17 @@ class TeamsDirectMessaging:
                 except Exception as e:
                     logger.error(f"Error parsing conflict response: {e}")
                 
-                # If we can't extract ID, fall back to searching for chats
-                return self._find_existing_chat(user_id)
+                # Fall back to alternative method
+                return self._create_chat_alternative(user_id)
             else:
                 logger.error(f"Failed to create chat: {response.status_code} {response.text}")
                 # Try alternative approach as a fallback
-                return self._find_existing_chat(user_id)
+                return self._create_chat_alternative(user_id)
         except Exception as e:
             logger.error(f"Error in create_chat: {e}")
-            return None
-            
-    def _find_existing_chat(self, user_id):
-        """
-        Try to find an existing chat with the user
-        This is a fallback if direct creation fails
-        """
-        if not self.access_token:
-            if not self.authenticate():
-                return None
-                
-        headers = {
-            "Authorization": f"Bearer {self.access_token}",
-            "Content-Type": "application/json"
-        }
-        
-        try:
-            # Try to list all chats
-            url = "https://graph.microsoft.com/v1.0/chats"
-            logger.info("Attempting to list all chats to find existing chat")
-            
-            response = requests.get(url, headers=headers)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if "value" in data:
-                    chats = data["value"]
-                    logger.info(f"Found {len(chats)} chats, looking for one with user {user_id}")
-                    
-                    # For each chat, try to find one that includes our target user
-                    for chat in chats:
-                        chat_id = chat.get("id")
-                        
-                        # Get members of this chat
-                        members_url = f"https://graph.microsoft.com/v1.0/chats/{chat_id}/members"
-                        members_response = requests.get(members_url, headers=headers)
-                        
-                        if members_response.status_code == 200:
-                            members_data = members_response.json()
-                            if "value" in members_data:
-                                members = members_data["value"]
-                                
-                                # Check if our target user is a member
-                                for member in members:
-                                    member_id = member.get("userId")
-                                    if member_id == user_id:
-                                        logger.info(f"Found existing chat with user: {chat_id}")
-                                        return chat_id
-            
-            # If we get here, we couldn't find an existing chat
-            logger.warning(f"Could not find existing chat with user {user_id}")
-            
-            # Create a new chat using alternative approach
+            logger.error(traceback.format_exc())
             return self._create_chat_alternative(user_id)
-        except Exception as e:
-            logger.error(f"Error in _find_existing_chat: {e}")
-            return self._create_chat_alternative(user_id)
-    
+
     def _create_chat_alternative(self, user_id):
         """
         Alternative approach to create a chat
@@ -265,22 +218,29 @@ class TeamsDirectMessaging:
             
             response = requests.post(url, headers=headers, json=chat_data)
             
+            # Log full response for debugging
+            logger.info(f"Alternative create chat response status: {response.status_code}")
+            logger.info(f"Alternative create chat response: {response.text[:500]}")
+            
             if response.status_code in [200, 201]:
                 data = response.json()
                 chat_id = data.get("id")
                 logger.info(f"Successfully created chat with alternative approach: {chat_id}")
+                
+                # Wait a moment to let the chat be fully created before sending messages
+                time.sleep(2)
                 return chat_id
             else:
                 logger.error(f"Alternative chat creation failed: {response.status_code} {response.text}")
                 return None
         except Exception as e:
             logger.error(f"Error in _create_chat_alternative: {e}")
+            logger.error(traceback.format_exc())
             return None
-            
+    
     def send_direct_message(self, chat_id, message_content):
         """
-        Send a message to a chat
-        This uses the ChatMessage.Send application permission
+        Send a message to a chat with improved error handling and fallbacks
         """
         if not self.access_token:
             if not self.authenticate():
@@ -291,27 +251,78 @@ class TeamsDirectMessaging:
             "Content-Type": "application/json"
         }
         
-        message_data = {
+        # First try: Simple text message as a test
+        simple_message = {
             "body": {
-                "content": message_content,
-                "contentType": "html"
+                "content": "Notification from Missing Timesheet Reporter",
+                "contentType": "text"
             }
         }
         
         try:
             url = f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages"
-            logger.info(f"Sending message to chat ID: {chat_id}")
+            logger.info(f"Testing message sending to chat ID: {chat_id}")
             
-            response = requests.post(url, headers=headers, json=message_data)
+            # First send a simple test message
+            simple_response = requests.post(url, headers=headers, json=simple_message)
+            logger.info(f"Simple message response: Status {simple_response.status_code}")
             
-            if response.status_code in [200, 201]:
-                logger.info(f"Successfully sent message to chat {chat_id}")
+            if simple_response.status_code in [200, 201]:
+                logger.info("Simple test message sent successfully, now sending full message")
+                
+                # Wait a moment before sending the main message
+                time.sleep(1)
+                
+                # Now try sending the full HTML message in parts to avoid potential size issues
+                # First send the header
+                header = f"""
+                <div>
+                <h2>Missing Timesheet Notification</h2>
+                <p>Hi there,</p>
+                <p>This is a notification about missing timesheet entries.</p>
+                </div>
+                """
+                
+                header_message = {
+                    "body": {
+                        "content": header,
+                        "contentType": "html"
+                    }
+                }
+                
+                header_response = requests.post(url, headers=headers, json=header_message)
+                logger.info(f"Header message response: Status {header_response.status_code}")
+                
+                # Now send the content as plain text
+                content_text = "Please check your assigned tasks and log your hours as soon as possible."
+                
+                content_message = {
+                    "body": {
+                        "content": content_text,
+                        "contentType": "text"
+                    }
+                }
+                
+                content_response = requests.post(url, headers=headers, json=content_message)
+                logger.info(f"Content message response: Status {content_response.status_code}")
+                
+                # Success if at least the simple message was sent
                 return True
             else:
-                logger.error(f"Failed to send message: {response.status_code} {response.text}")
-                return False
+                logger.error(f"Failed to send even simple message: {simple_response.status_code} {simple_response.text}")
+                
+                # Final fallback - try with beta endpoint
+                beta_url = f"https://graph.microsoft.com/beta/chats/{chat_id}/messages"
+                beta_response = requests.post(beta_url, headers=headers, json=simple_message)
+                
+                if beta_response.status_code in [200, 201]:
+                    logger.info("Successfully sent message using beta endpoint")
+                    return True
+                else:
+                    logger.error(f"Beta endpoint also failed: {beta_response.status_code} {beta_response.text}")
+                    return False
         except Exception as e:
-            logger.error(f"Error in send_direct_message: {e}")
+            logger.error(f"Error in send_direct_message: {e}", exc_info=True)
             return False
             
     def check_authentication(self):

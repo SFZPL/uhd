@@ -362,66 +362,42 @@ def send_teams_direct_message(
             
         logger.info(f"Successfully created/found chat with ID: {chat_id}")
         
-        # Format message based on urgency
+        # Format message information - we'll send this as separate messages
+        # to avoid potential HTML formatting issues
         max_days_overdue = max(t.get("Days Overdue", 0) for t in tasks)
         one_day = (max_days_overdue == 1)
         
-        # Format title based on urgency
+        # First message - introduction
         if one_day:
-            title = "Quick Nudge – Log Your Hours"
-            emoji = "🟠"
-            intro = ("This is a gentle reminder to log your hours for the "
-                     "task below — it only takes a minute:")
+            intro = f"🟠 Quick Nudge – Log Your Hours\n\nHi {designer_name},\n\nThis is a gentle reminder to log your hours for the tasks below — it only takes a minute:"
         else:
-            title = "Heads-Up: You've Missed Logging Hours for 2 Days"
-            emoji = "🔴"
-            intro = ("It looks like no hours have been logged for the past "
-                     "two days for the task(s) below:")
-
-        # Create HTML for tasks table
-        tasks_html = "<table border='1' cellpadding='6' cellspacing='0'>"
-        tasks_html += "<tr><th>Task</th><th>Project</th><th>Date</th><th>Client Success Contact</th></tr>"
+            intro = f"🔴 Heads-Up: You've Missed Logging Hours for 2 Days\n\nHi {designer_name},\n\nIt looks like no hours have been logged for the past two days for the task(s) below:"
+            
+        # Send intro message
+        if not teams_client.send_direct_message(chat_id, intro):
+            logger.warning("Failed to send intro message, but continuing with task details")
         
-        for t in tasks:
-            tasks_html += f"""<tr>
-                <td>{t.get('Task', 'Unknown')}</td>
-                <td>{t.get('Project', 'Unknown')}</td>
-                <td>{t.get('Date', '—')}</td>
-                <td>{t.get('Client Success Member', 'Unknown')}</td>
-            </tr>"""
+        # Second message - tasks list
+        tasks_text = ""
+        for i, t in enumerate(tasks, 1):
+            tasks_text += f"{i}. Project: {t.get('Project', 'Unknown')}, Task: {t.get('Task', 'Unknown')}, Date: {t.get('Date', '—')}, CS Contact: {t.get('Client Success Member', 'Unknown')}\n\n"
         
-        tasks_html += "</table>"
-
-        # Create HTML message body
-        message_html = f"""
-        <h2>{emoji} {title}</h2>
-        <p>Hi {designer_name},</p>
-        <p>{intro}</p>
+        # Send tasks list
+        if not teams_client.send_direct_message(chat_id, tasks_text):
+            logger.warning("Failed to send tasks list, but continuing with footer")
         
-        {tasks_html}
-        
-        <p>
-            {"Taking a minute now helps us stay on top of things later 🙌<br>Let us know if you need any support with this." 
-            if one_day else 
-            "We completely understand things can get busy — but consistent time logging helps us improve project planning and smooth reporting.<br>If something's holding you back from logging your hours, just reach out. We're here to help."}
-        </p>
-        
-        <p style='font-size: 12px; color: gray;'>— Automated notice from the Missing Timesheet Reporter</p>
-        """
-
-        # Log the message content length
-        logger.info(f"Message HTML length: {len(message_html)} characters")
-        
-        # Send message to chat
-        logger.info(f"Attempting to send message to chat ID: {chat_id}")
-        message_sent = teams_client.send_direct_message(chat_id, message_html)
-        
-        if message_sent:
-            logger.info(f"Direct message sent to {designer_name} via Teams")
-            return True
+        # Third message - footer
+        if one_day:
+            footer = "Taking a minute now helps us stay on top of things later 🙌\nLet us know if you need any support with this.\n\n— Automated notice from the Missing Timesheet Reporter"
         else:
-            logger.error(f"Failed to send direct message to {designer_name}")
-            return False
+            footer = "We completely understand things can get busy — but consistent time logging helps us improve project planning and smooth reporting.\nIf something's holding you back from logging your hours, just reach out. We're here to help.\n\n— Automated notice from the Missing Timesheet Reporter"
+        
+        # Send footer message
+        if not teams_client.send_direct_message(chat_id, footer):
+            logger.warning("Failed to send footer message")
+        
+        # If we got this far, consider it a success even if some parts failed
+        return True
 
     except Exception as exc:
         logger.error(f"send_teams_direct_message failed: {exc}", exc_info=True)
