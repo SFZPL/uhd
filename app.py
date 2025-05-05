@@ -22,7 +22,8 @@ from teams_direct_messaging import TeamsMessenger
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    filename='planning_timesheet_reporter.log'
+    filename='planning_timesheet_reporter.log',
+    force=True  # Add this line to reset any existing logging configuration
 )
 logger = logging.getLogger(__name__)
 
@@ -142,36 +143,16 @@ def send_designer_notification(designer_name, designer_teams_id, tasks):
         st.session_state.azure_tenant_id
     )
     
-    # Format a proper message
+    # Format a compact message for topic
     max_days_overdue = max(t.get("Days Overdue", 0) for t in tasks)
-    one_day = (max_days_overdue == 1)
+    urgency_emoji = "🔴" if max_days_overdue >= 2 else "🟠"
     
-    message = f"{'🟠' if one_day else '🔴'} Missing Timesheet Alert\n\n"
-    message += f"Hi {designer_name},\n\n"
+    # Create a concise but informative topic
+    task_summary = f"{len(tasks)} task{'s' if len(tasks) > 1 else ''}"
+    oldest_date = min([t.get("Date", "") for t in tasks if t.get("Date")])
     
-    if one_day:
-        message += "This is a gentle reminder to log your hours for the task(s) below — it only takes a minute:\n\n"
-    else:
-        message += "It looks like no hours have been logged for the past two days for the task(s) below:\n\n"
-    
-    # Add tasks in simple text format
-    for i, t in enumerate(tasks, 1):
-        message += f"{i}. Project: {t.get('Project', 'Unknown')}\n"
-        message += f"   Task: {t.get('Task', 'Unknown')}\n"
-        message += f"   Date: {t.get('Date', '—')}\n"
-        message += f"   Allocated Hours: {t.get('Allocated Hours', '—')}\n"
-        message += f"   CS Contact: {t.get('Client Success Member', 'Unknown')}\n\n"
-    
-    # Add footer
-    if one_day:
-        message += "Taking a minute now helps us stay on top of things later 🙌\n"
-        message += "Let us know if you need any support with this.\n\n"
-    else:
-        message += "We completely understand things can get busy — but consistent time logging "
-        message += "helps us improve project planning and smooth reporting.\n"
-        message += "If something's holding you back from logging your hours, just reach out. We're here to help.\n\n"
-    
-    message += "— Automated notice from the Missing Timesheet Reporter"
+    # Format the notification topic
+    message = f"{urgency_emoji} TIMESHEET ALERT - {task_summary} missing hours (oldest: {oldest_date}) - Action required"
     
     # Send notification
     return messenger.notify_user(designer_teams_id, message)
