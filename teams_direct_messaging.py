@@ -63,7 +63,7 @@ class TeamsMessenger:
             return False
     
     def _create_notification_chat(self, user_id, message_text):
-        """Create a chat with the notification as the topic"""
+        """Create a chat with a more informative notification as the topic"""
         try:
             headers = {
                 "Authorization": f"Bearer {self.access_token}",
@@ -71,11 +71,29 @@ class TeamsMessenger:
             }
             
             # Format message and clean it for topic (remove invalid characters)
-            clean_message = message_text.replace(':', ' -').replace('\n', ' ')
+            # Replace invalid characters, collapse multiple spaces, remove line breaks
+            clean_message = message_text.replace(':', ' -').replace('\n', ' ').replace('\r', ' ')
+            clean_message = ' '.join(clean_message.split())  # Collapse multiple spaces
             timestamp = time.strftime('%Y-%m-%d %H-%M')
             
-            # Create topic that serves as the notification
-            topic = f"{clean_message} [{timestamp}]"
+            # Extract key information from the message
+            # Look for patterns in the message to create a better title
+            urgency = "🔴"  # Default to high urgency
+            if "gentle reminder" in clean_message.lower():
+                urgency = "🟠"
+            
+            # Try to extract task info
+            task_count = "multiple tasks"
+            task_match = message_text.count("Task:")
+            if task_match > 0:
+                task_count = f"{task_match} task{'s' if task_match > 1 else ''}"
+            
+            # Create a more informative topic
+            topic = f"{urgency} TIMESHEET ALERT - {task_count} need attention - {timestamp}"
+            
+            # Truncate if needed (200 char limit)
+            if len(topic) > 200:
+                topic = topic[:197] + "..."
             
             # Create chat with notification in topic
             chat_data = {
