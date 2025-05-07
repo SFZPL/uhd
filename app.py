@@ -828,11 +828,10 @@ def send_designer_email(
         return False
 
 # Add these functions after send_designer_email function (around line 487)
-
 def load_employee_manager_mapping():
     """Load employee-manager relationships from Excel file"""
     try:
-        # Try to find the Excel file
+        # The file is already in the app directory
         excel_path = "uhd_data.xlsx"
         
         # Check if file exists
@@ -843,7 +842,7 @@ def load_employee_manager_mapping():
         # Load Excel
         df = pd.read_excel(excel_path)
         
-        # Create mapping dictionary - designer name to manager info
+        # Create mapping dictionary
         mapping = {}
         
         # Process each employee row
@@ -851,25 +850,25 @@ def load_employee_manager_mapping():
             try:
                 employee_name = row["Employee Name"]
                 manager_name = row["Manager"]
-                manager_email = row["Work Email"]  # This is the employee's email, not manager's
-                department = row["Department"]
+                work_email = row["Work Email"]
                 
                 if pd.notna(employee_name) and pd.notna(manager_name):
-                    # Find the manager's email by looking up the manager in the dataframe
+                    # Find manager's email by looking up the manager in the dataframe
                     manager_row = df[df["Employee Name"] == manager_name]
                     if not manager_row.empty and pd.notna(manager_row.iloc[0]["Work Email"]):
                         manager_email = manager_row.iloc[0]["Work Email"]
-                        
-                        # Store the mapping with the employee name as the key
-                        mapping[employee_name] = {
-                            "manager_name": manager_name,
-                            "manager_email": manager_email,
-                            "department": department
-                        }
                     else:
+                        # If manager not found in dataframe, use a default email
                         logger.warning(f"Could not find email for manager {manager_name} of {employee_name}")
+                        continue
+                    
+                    # Store the mapping with the employee name as the key
+                    mapping[employee_name] = {
+                        "manager_name": manager_name,
+                        "manager_email": manager_email
+                    }
             except Exception as e:
-                logger.warning(f"Error processing row for employee: {e}")
+                logger.warning(f"Error processing row for employee {row.get('Employee Name', 'Unknown')}: {e}")
                 continue
         
         logger.info(f"Loaded {len(mapping)} employee-manager relationships")
@@ -878,7 +877,7 @@ def load_employee_manager_mapping():
         error_details = traceback.format_exc()
         logger.error(f"Error loading employee mapping: {e}\n{error_details}")
         return {}
-
+    
 def send_manager_email(manager_name, manager_email, designers_tasks, selected_date):
     """Send email to a manager about their team's missing timesheets"""
     try:
@@ -1833,9 +1832,9 @@ def main():
             st.markdown("### Manager Email Settings")
             st.info("Manager notifications use the same email settings as the main email notifications. Make sure email notifications are configured.")
             
-            st.write("Manager-Employee relationships are loaded from: `Employees EmailsSheet1.csv`")
+            # The file is already in the repository
+            st.success("✅ Employee data loaded from uhd_data.xlsx")
             
-            # Test button
             # Test button
             if st.button("Test Manager Notifications"):
                 if not st.session_state.email_enabled:
@@ -1846,11 +1845,11 @@ def main():
                         st.session_state.smtp_password):
                     st.error("Please configure email settings first")
                 else:
-                    # Create test data with a specific manager
+                    # Create test data
                     test_manager_name = "Sanad Feras Khaleel Zaqtan"
-                    test_manager_email = "sanad.zaqtan@prezlab.com"  # This should come from your Excel file
+                    test_manager_email = "sanad.zaqtan@prezlab.com"
                     
-                    # Create a test designer under this manager
+                    # Create test designer task data
                     test_designers = {
                         "Test Designer": [
                             {
@@ -1864,14 +1863,6 @@ def main():
                                 "Client Success Member": "Test Manager"
                             }
                         ]
-                    }
-                    
-                    # Create a manual manager mapping that overrides the Excel file for testing
-                    test_mapping = {
-                        "Test Designer": {
-                            "manager_name": test_manager_name,
-                            "manager_email": test_manager_email
-                        }
                     }
                     
                     with st.spinner("Sending test manager notifications..."):
