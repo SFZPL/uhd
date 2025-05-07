@@ -892,92 +892,93 @@ def send_manager_email(manager_name, manager_email, designers_tasks, selected_da
         # Set email subject and greeting based on days overdue
         if max_days_overdue >= 2:
             subject = f"Urgent: Team Members Haven't Logged Hours for 2 Days - Via Teams"
-            greeting = f"Hi {manager_name},\n\nWe've noticed that the following team members have <b>not logged their hours for 2 consecutive days</b> on assigned tasks. This is creating delays in tracking and reporting:"
+            greeting = f"Hi {manager_name},"
+            intro_text = "We've noticed that the following team members have <b>not logged their hours for 2 consecutive days</b> on assigned tasks. This is creating delays in tracking and reporting:"
             closing = "This needs immediate follow-up. Please address this with your team and make sure all pending hours are logged without further delay.\n\nLet us know if any blockers are preventing this from happening."
         else:
             subject = f"Unlogged Hours Report – {selected_date.strftime('%Y-%m-%d')} - Via Teams"
-            greeting = f"Hi {manager_name},\n\nThe following team members haven't logged their hours for tasks assigned on <b>{selected_date.strftime('%Y-%m-%d')}</b>:"
+            greeting = f"Hi {manager_name},"
+            intro_text = f"The following team members haven't logged their hours for tasks assigned on <b>{selected_date.strftime('%Y-%m-%d')}</b>:"
             closing = "Reminders have already been sent to the individuals. Kindly follow up as needed to ensure all hours are logged promptly.\n\nLet us know if you need anything else."
         
         # Create email
-        msg = MIMEMultipart()
+        msg = MIMEMultipart('alternative')
         msg['From'] = st.session_state.smtp_username
         msg['To'] = manager_email
         msg['Subject'] = subject
-        
-        # Build email body
-        body = f"{greeting}\n\n"
-        
-        # Add each designer and their tasks
-        for designer_name, tasks in designers_tasks.items():
-            # Sort tasks by days overdue (descending)
-            sorted_tasks = sorted(tasks, key=lambda x: x.get('Days Overdue', 0), reverse=True)
-            
-            for i, task in enumerate(sorted_tasks):
-                if i == 0:
-                    # First task for this designer
-                    body += f"<b>{designer_name}</b>\n"
-                
-                # Add task details
-                body += f"• <b>Project</b>: {task.get('Project', 'Unknown')}\n"
-                body += f"• <b>Task</b>: {task.get('Task', 'Unknown')}\n"
-                
-                if max_days_overdue >= 2:
-                    body += f"• <b>Assignment Dates</b>: {task.get('Date', 'Unknown')}\n"
-                else:
-                    body += f"• <b>Time Assigned</b>: {task.get('Start Time', 'Unknown')}\n"
-                
-                body += f"• <b>Client Success Contact</b>: {task.get('Client Success Member', 'Unknown')}\n\n"
-        
-        # Add closing
-        body += f"{closing}\n\nThanks,\n— Operations Team"
         
         # Create HTML version
         html_body = f"""
         <html>
         <body>
-        <p>{greeting.replace('\n\n', '<br><br>')}</p>
-        
-        <div style="margin-left: 20px;">
+        <p>{greeting}</p>
+        <p>{intro_text}</p>
+        <ol>
         """
         
         # Add each designer and their tasks in HTML
+        designer_counter = 1
         for designer_name, tasks in designers_tasks.items():
             # Sort tasks by days overdue (descending)
             sorted_tasks = sorted(tasks, key=lambda x: x.get('Days Overdue', 0), reverse=True)
             
-            for i, task in enumerate(sorted_tasks):
-                if i == 0:
-                    # First task for this designer
-                    html_body += f"<p><strong>{i+1}. {designer_name}</strong></p>\n<ul>\n"
-                
+            html_body += f"<li><b>{designer_name}</b>\n<ul>\n"
+            
+            for task in sorted_tasks:
                 # Add task details
-                html_body += f"<li><strong>Project</strong>: {task.get('Project', 'Unknown')}</li>\n"
-                html_body += f"<li><strong>Task</strong>: {task.get('Task', 'Unknown')}</li>\n"
+                html_body += f"<li><b>Project</b>: {task.get('Project', 'Unknown')}</li>\n"
+                html_body += f"<li><b>Task</b>: {task.get('Task', 'Unknown')}</li>\n"
                 
                 if max_days_overdue >= 2:
-                    html_body += f"<li><strong>Assignment Dates</strong>: {task.get('Date', 'Unknown')}</li>\n"
+                    html_body += f"<li><b>Assignment Dates</b>: {task.get('Date', 'Unknown')}</li>\n"
                 else:
-                    html_body += f"<li><strong>Time Assigned</strong>: {task.get('Start Time', 'Unknown')}</li>\n"
+                    html_body += f"<li><b>Time Assigned</b>: {task.get('Start Time', 'Unknown')}</li>\n"
                 
-                html_body += f"<li><strong>Client Success Contact</strong>: {task.get('Client Success Member', 'Unknown')}</li>\n"
-                
-                if i == len(sorted_tasks) - 1:
-                    html_body += "</ul>\n"
+                html_body += f"<li><b>Client Success Contact</b>: {task.get('Client Success Member', 'Unknown')}</li>\n"
+            
+            html_body += "</ul></li>\n"
+            designer_counter += 1
         
         # Add closing in HTML
         html_body += f"""
-        </div>
-        
-        <p>{closing.replace('\n\n', '<br><br>')}</p>
-        
+        </ol>
+        <p>{closing}</p>
         <p>Thanks,<br>— Operations Team</p>
         </body>
         </html>
         """
         
-        # Attach both text and HTML versions
-        msg.attach(MIMEText(body, 'plain'))
+        # Create plain text version
+        text_body = f"{greeting}\n\n{intro_text}\n\n"
+        
+        # Add each designer and their tasks
+        designer_counter = 1
+        for designer_name, tasks in designers_tasks.items():
+            # Sort tasks by days overdue (descending)
+            sorted_tasks = sorted(tasks, key=lambda x: x.get('Days Overdue', 0), reverse=True)
+            
+            text_body += f"{designer_counter}. {designer_name}\n"
+            
+            for task in sorted_tasks:
+                # Add task details
+                text_body += f"  • Project: {task.get('Project', 'Unknown')}\n"
+                text_body += f"  • Task: {task.get('Task', 'Unknown')}\n"
+                
+                if max_days_overdue >= 2:
+                    text_body += f"  • Assignment Dates: {task.get('Date', 'Unknown')}\n"
+                else:
+                    text_body += f"  • Time Assigned: {task.get('Start Time', 'Unknown')}\n"
+                
+                text_body += f"  • Client Success Contact: {task.get('Client Success Member', 'Unknown')}\n"
+            
+            text_body += "\n"
+            designer_counter += 1
+        
+        # Add closing
+        text_body += f"{closing}\n\nThanks,\n— Operations Team"
+        
+        # Attach both versions
+        msg.attach(MIMEText(text_body, 'plain'))
         msg.attach(MIMEText(html_body, 'html'))
         
         # Send email
