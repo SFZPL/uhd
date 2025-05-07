@@ -1835,6 +1835,7 @@ def main():
             st.write("Manager-Employee relationships are loaded from: `Employees EmailsSheet1.csv`")
             
             # Test button
+            # Test button
             if st.button("Test Manager Notifications"):
                 if not st.session_state.email_enabled:
                     st.error("Please enable email notifications first")
@@ -1844,7 +1845,11 @@ def main():
                         st.session_state.smtp_password):
                     st.error("Please configure email settings first")
                 else:
-                    # Create test data
+                    # Create test data with a specific manager
+                    test_manager_name = "Sanad Feras Khaleel Zaqtan"
+                    test_manager_email = "sanad.zaqtan@prezlab.com"  # This should come from your Excel file
+                    
+                    # Create a test designer under this manager
                     test_designers = {
                         "Test Designer": [
                             {
@@ -1860,20 +1865,27 @@ def main():
                         ]
                     }
                     
-                    # Send test notifications
+                    # Create a manual manager mapping that overrides the Excel file for testing
+                    test_mapping = {
+                        "Test Designer": {
+                            "manager_name": test_manager_name,
+                            "manager_email": test_manager_email
+                        }
+                    }
+                    
                     with st.spinner("Sending test manager notifications..."):
-                        sent, success_count, fail_count = send_manager_notifications(
+                        # Send test notification directly
+                        email_sent = send_manager_email(
+                            test_manager_name,
+                            test_manager_email,
                             test_designers,
                             datetime.now().date()
                         )
                         
-                        if sent and success_count > 0:
-                            st.success(f"Sent test notifications to {success_count} managers")
-                        elif sent and fail_count > 0:
-                            st.warning(f"Failed to send notifications to {fail_count} managers")
+                        if email_sent:
+                            st.success(f"Test notification sent to {test_manager_name} ({test_manager_email})")
                         else:
-                            st.error("Failed to send any manager notifications. Check the logs for details.")
-
+                            st.error(f"Failed to send test notification to {test_manager_name}")
             # Add option to import mappings from CSV
             st.markdown("### Import Mappings")
             uploaded_file = st.file_uploader("Upload CSV with designer mappings", type="csv")
