@@ -249,7 +249,7 @@ def render_teams_direct_messaging_ui():
                 with col3:
                     if st.button("Remove", key=f"remove_teams_{idx}"):
                         del st.session_state.designer_teams_id_mapping[designer]
-                        st.experimental_rerun()
+                        st.rerun()
         
         # Test message section
         st.markdown("### Test Message")
@@ -1819,7 +1819,7 @@ def main():
                     with col3:
                         if st.button("Remove", key=f"remove_{idx}"):
                             del st.session_state.designer_email_mapping[designer]
-                            st.experimental_rerun()
+                            st.rerun()
             
         # Add after the "Designer Email Notifications" section (around line 770)
         with st.sidebar.expander("Manager Notifications", expanded=False):
@@ -2002,7 +2002,7 @@ def main():
                     with col2:
                         if st.button("Remove", key=f"remove_webhook_{idx}"):
                             del st.session_state.designer_webhook_mapping[designer]
-                            st.experimental_rerun()
+                            st.rerun()
             
             # Test button
             if st.button("Test Webhook"):
