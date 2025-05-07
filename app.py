@@ -67,6 +67,9 @@ if 'designer_email_mapping' not in st.session_state:
     st.session_state.designer_email_mapping = {}
 if 'smtp_server' not in st.session_state:
     st.session_state.smtp_server = "smtp.gmail.com"
+# Add after the email settings initialization (around line 50-70)
+if 'manager_emails_enabled' not in st.session_state:
+    st.session_state.manager_emails_enabled = False
 # Email settings
 if 'smtp_port' not in st.session_state:
     st.session_state.smtp_port = 587
@@ -824,6 +827,239 @@ def send_designer_email(
         logger.error("send_designer_email failed: %s", exc, exc_info=True)
         return False
 
+# Add these functions after send_designer_email function (around line 487)
+
+def load_employee_manager_mapping():
+    """Load employee-manager relationships from Excel file"""
+    try:
+        # Try to find the Excel file
+        excel_path = "uhd_data.xlsx"
+        
+        # Check if file exists
+        if not os.path.exists(excel_path):
+            logger.error(f"Employee mapping file not found: {excel_path}")
+            return {}
+        
+        # Load Excel
+        df = pd.read_excel(excel_path)
+        
+        # Create mapping dictionary - designer name to manager info
+        mapping = {}
+        
+        # Process each employee row
+        for _, row in df.iterrows():
+            try:
+                employee_name = row["Employee Name"]
+                manager_name = row["Manager"]
+                manager_email = row["Work Email"]  # This is the employee's email, not manager's
+                department = row["Department"]
+                
+                if pd.notna(employee_name) and pd.notna(manager_name):
+                    # Find the manager's email by looking up the manager in the dataframe
+                    manager_row = df[df["Employee Name"] == manager_name]
+                    if not manager_row.empty and pd.notna(manager_row.iloc[0]["Work Email"]):
+                        manager_email = manager_row.iloc[0]["Work Email"]
+                        
+                        # Store the mapping with the employee name as the key
+                        mapping[employee_name] = {
+                            "manager_name": manager_name,
+                            "manager_email": manager_email,
+                            "department": department
+                        }
+                    else:
+                        logger.warning(f"Could not find email for manager {manager_name} of {employee_name}")
+            except Exception as e:
+                logger.warning(f"Error processing row for employee: {e}")
+                continue
+        
+        logger.info(f"Loaded {len(mapping)} employee-manager relationships")
+        return mapping
+    except Exception as e:
+        error_details = traceback.format_exc()
+        logger.error(f"Error loading employee mapping: {e}\n{error_details}")
+        return {}
+
+def send_manager_email(manager_name, manager_email, designers_tasks, selected_date):
+    """Send email to a manager about their team's missing timesheets"""
+    try:
+        # Determine if any tasks are more than 1 day overdue
+        max_days_overdue = 0
+        for designer_tasks in designers_tasks.values():
+            for task in designer_tasks:
+                days_overdue = task.get("Days Overdue", 0)
+                max_days_overdue = max(max_days_overdue, days_overdue)
+        
+        # Set email subject and greeting based on days overdue
+        if max_days_overdue >= 2:
+            subject = f"Urgent: Team Members Haven't Logged Hours for 2 Days - Via Teams"
+            greeting = f"Hi {manager_name},\n\nWe've noticed that the following team members have <b>not logged their hours for 2 consecutive days</b> on assigned tasks. This is creating delays in tracking and reporting:"
+            closing = "This needs immediate follow-up. Please address this with your team and make sure all pending hours are logged without further delay.\n\nLet us know if any blockers are preventing this from happening."
+        else:
+            subject = f"Unlogged Hours Report – {selected_date.strftime('%Y-%m-%d')} - Via Teams"
+            greeting = f"Hi {manager_name},\n\nThe following team members haven't logged their hours for tasks assigned on <b>{selected_date.strftime('%Y-%m-%d')}</b>:"
+            closing = "Reminders have already been sent to the individuals. Kindly follow up as needed to ensure all hours are logged promptly.\n\nLet us know if you need anything else."
+        
+        # Create email
+        msg = MIMEMultipart()
+        msg['From'] = st.session_state.smtp_username
+        msg['To'] = manager_email
+        msg['Subject'] = subject
+        
+        # Build email body
+        body = f"{greeting}\n\n"
+        
+        # Add each designer and their tasks
+        for designer_name, tasks in designers_tasks.items():
+            # Sort tasks by days overdue (descending)
+            sorted_tasks = sorted(tasks, key=lambda x: x.get('Days Overdue', 0), reverse=True)
+            
+            for i, task in enumerate(sorted_tasks):
+                if i == 0:
+                    # First task for this designer
+                    body += f"<b>{designer_name}</b>\n"
+                
+                # Add task details
+                body += f"• <b>Project</b>: {task.get('Project', 'Unknown')}\n"
+                body += f"• <b>Task</b>: {task.get('Task', 'Unknown')}\n"
+                
+                if max_days_overdue >= 2:
+                    body += f"• <b>Assignment Dates</b>: {task.get('Date', 'Unknown')}\n"
+                else:
+                    body += f"• <b>Time Assigned</b>: {task.get('Start Time', 'Unknown')}\n"
+                
+                body += f"• <b>Client Success Contact</b>: {task.get('Client Success Member', 'Unknown')}\n\n"
+        
+        # Add closing
+        body += f"{closing}\n\nThanks,\n— Operations Team"
+        
+        # Create HTML version
+        html_body = f"""
+        <html>
+        <body>
+        <p>{greeting.replace('\n\n', '<br><br>')}</p>
+        
+        <div style="margin-left: 20px;">
+        """
+        
+        # Add each designer and their tasks in HTML
+        for designer_name, tasks in designers_tasks.items():
+            # Sort tasks by days overdue (descending)
+            sorted_tasks = sorted(tasks, key=lambda x: x.get('Days Overdue', 0), reverse=True)
+            
+            for i, task in enumerate(sorted_tasks):
+                if i == 0:
+                    # First task for this designer
+                    html_body += f"<p><strong>{i+1}. {designer_name}</strong></p>\n<ul>\n"
+                
+                # Add task details
+                html_body += f"<li><strong>Project</strong>: {task.get('Project', 'Unknown')}</li>\n"
+                html_body += f"<li><strong>Task</strong>: {task.get('Task', 'Unknown')}</li>\n"
+                
+                if max_days_overdue >= 2:
+                    html_body += f"<li><strong>Assignment Dates</strong>: {task.get('Date', 'Unknown')}</li>\n"
+                else:
+                    html_body += f"<li><strong>Time Assigned</strong>: {task.get('Start Time', 'Unknown')}</li>\n"
+                
+                html_body += f"<li><strong>Client Success Contact</strong>: {task.get('Client Success Member', 'Unknown')}</li>\n"
+                
+                if i == len(sorted_tasks) - 1:
+                    html_body += "</ul>\n"
+        
+        # Add closing in HTML
+        html_body += f"""
+        </div>
+        
+        <p>{closing.replace('\n\n', '<br><br>')}</p>
+        
+        <p>Thanks,<br>— Operations Team</p>
+        </body>
+        </html>
+        """
+        
+        # Attach both text and HTML versions
+        msg.attach(MIMEText(body, 'plain'))
+        msg.attach(MIMEText(html_body, 'html'))
+        
+        # Send email
+        server = smtplib.SMTP(st.session_state.smtp_server, st.session_state.smtp_port)
+        server.starttls()
+        server.login(st.session_state.smtp_username, st.session_state.smtp_password)
+        server.send_message(msg)
+        server.quit()
+        
+        logger.info(f"Manager notification sent to {manager_name} ({manager_email})")
+        return True
+    except Exception as e:
+        error_details = traceback.format_exc()
+        logger.error(f"Error sending manager email: {e}\n{error_details}")
+        return False
+
+def send_manager_notifications(designers, selected_date, reference_date=None):
+    """Send email notifications to managers about their team members' missing timesheets"""
+    if not st.session_state.email_enabled:
+        logger.info("Email sending is disabled, skipping manager notifications")
+        return False, 0, 0
+        
+    if not (st.session_state.smtp_server and 
+            st.session_state.smtp_port and
+            st.session_state.smtp_username and 
+            st.session_state.smtp_password):
+        logger.error("Email settings not configured")
+        return False, 0, 0
+    
+    try:
+        # Load employee-manager mapping
+        employee_manager_mapping = load_employee_manager_mapping()
+        if not employee_manager_mapping:
+            logger.error("Could not load employee-manager mapping")
+            return False, 0, 0
+        
+        # Group tasks by manager
+        managers_tasks = {}
+        
+        for designer, tasks in designers.items():
+            # Find the manager for this designer
+            if designer in employee_manager_mapping:
+                manager_info = employee_manager_mapping[designer]
+                manager_name = manager_info["manager_name"]
+                manager_email = manager_info["manager_email"]
+                
+                if manager_name not in managers_tasks:
+                    managers_tasks[manager_name] = {
+                        "email": manager_email,
+                        "designers": {}
+                    }
+                
+                if designer not in managers_tasks[manager_name]["designers"]:
+                    managers_tasks[manager_name]["designers"][designer] = []
+                
+                managers_tasks[manager_name]["designers"][designer].extend(tasks)
+            else:
+                logger.warning(f"No manager found for {designer}")
+        
+        # Send emails to managers
+        success_count = 0
+        fail_count = 0
+        
+        for manager_name, manager_data in managers_tasks.items():
+            # Prepare email content
+            email_sent = send_manager_email(
+                manager_name,
+                manager_data["email"],
+                manager_data["designers"],
+                selected_date
+            )
+            
+            if email_sent:
+                success_count += 1
+            else:
+                fail_count += 1
+        
+        return True, success_count, fail_count
+    except Exception as e:
+        error_details = traceback.format_exc()
+        logger.error(f"Error sending manager notifications: {e}\n{error_details}")
+        return False, 0, 0
 
 def generate_missing_timesheet_report(selected_date, shift_status_filter=None, send_email=False, send_designer_emails=False):
     """
@@ -1337,6 +1573,27 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     error_details = traceback.format_exc()
                     logger.error(f"Error sending Teams direct messages: {e}\n{error_details}")
                     st.warning(f"Error sending Teams direct messages: {e}")
+            # Add right after the Teams direct messages section in the generate_missing_timesheet_report function 
+            # (around line 1155, after "st.warning(f"Failed to send Teams direct messages to {fail_count} designers")")
+            # Send manager notifications if enabled
+            if st.session_state.manager_emails_enabled and (missing_count > 0 or st.session_state.debug_mode):
+                try:
+                    sent, success_count, fail_count = send_manager_notifications(
+                        designers, 
+                        selected_date,
+                        reference_date
+                    )
+                    
+                    if sent:
+                        if success_count > 0:
+                            st.success(f"Sent notifications to {success_count} managers")
+                        if fail_count > 0:
+                            st.warning(f"Failed to send notifications to {fail_count} managers")
+                except Exception as e:
+                    error_details = traceback.format_exc()
+                    logger.error(f"Error sending manager notifications: {e}\n{error_details}")
+                    st.warning(f"Error sending manager notifications: {e}")
+            
             return df, missing_count, len(timesheet_entries)
         else:
             # Return empty DataFrame with columns
@@ -1564,6 +1821,59 @@ def main():
                             del st.session_state.designer_email_mapping[designer]
                             st.experimental_rerun()
             
+        # Add after the "Designer Email Notifications" section (around line 770)
+        with st.sidebar.expander("Manager Notifications", expanded=False):
+            st.session_state.manager_emails_enabled = st.checkbox(
+                "Enable Manager Notifications", 
+                value=st.session_state.manager_emails_enabled,
+                help="Send email notifications to managers about their team members' missing timesheets"
+            )
+            
+            st.markdown("### Manager Email Settings")
+            st.info("Manager notifications use the same email settings as the main email notifications. Make sure email notifications are configured.")
+            
+            st.write("Manager-Employee relationships are loaded from: `Employees EmailsSheet1.csv`")
+            
+            # Test button
+            if st.button("Test Manager Notifications"):
+                if not st.session_state.email_enabled:
+                    st.error("Please enable email notifications first")
+                elif not (st.session_state.smtp_server and 
+                        st.session_state.smtp_port and
+                        st.session_state.smtp_username and 
+                        st.session_state.smtp_password):
+                    st.error("Please configure email settings first")
+                else:
+                    # Create test data
+                    test_designers = {
+                        "Test Designer": [
+                            {
+                                "Project": "Test Project",
+                                "Task": "Test Task",
+                                "Start Time": "09:00",
+                                "End Time": "17:00",
+                                "Allocated Hours": 8.0,
+                                "Date": datetime.now().date().strftime("%Y-%m-%d"),
+                                "Days Overdue": 1,
+                                "Client Success Member": "Test Manager"
+                            }
+                        ]
+                    }
+                    
+                    # Send test notifications
+                    with st.spinner("Sending test manager notifications..."):
+                        sent, success_count, fail_count = send_manager_notifications(
+                            test_designers,
+                            datetime.now().date()
+                        )
+                        
+                        if sent and success_count > 0:
+                            st.success(f"Sent test notifications to {success_count} managers")
+                        elif sent and fail_count > 0:
+                            st.warning(f"Failed to send notifications to {fail_count} managers")
+                        else:
+                            st.error("Failed to send any manager notifications. Check the logs for details.")
+
             # Add option to import mappings from CSV
             st.markdown("### Import Mappings")
             uploaded_file = st.file_uploader("Upload CSV with designer mappings", type="csv")
