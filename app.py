@@ -135,6 +135,80 @@ if hasattr(st.secrets, "EMAIL"):
         st.session_state.smtp_username = st.secrets.EMAIL.SMTP_USERNAME
     if "SMTP_PASSWORD" in st.secrets.EMAIL and not st.session_state.smtp_password:
         st.session_state.smtp_password = st.secrets.EMAIL.SMTP_PASSWORD
+# Add this code near the beginning of your app, after initializing session state variables
+
+# Initialize data container
+if 'employee_data' not in st.session_state:
+    st.session_state.employee_data = None
+
+# Load employee data at startup
+def load_employee_data():
+    try:
+        csv_path = "uhd_data.csv"
+        if os.path.exists(csv_path):
+            logger.info(f"Loading employee data from CSV: {csv_path}")
+            df = pd.read_csv(csv_path)
+            
+            # Verify required columns exist
+            required_columns = ["Employee Name", "Manager", "Work Email"]
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            if missing_columns:
+                logger.error(f"Required columns missing from CSV: {missing_columns}")
+                return None
+                
+            # Add Microsoft IDs from Teams mappings if available
+            if hasattr(st.secrets, "TEAMS_USER_IDS"):
+                # Create a lookup dictionary from email to Teams ID
+                email_to_teams_id = {}
+                for designer_name, teams_id in st.secrets.TEAMS_USER_IDS.items():
+                    # Try to find corresponding email in dataframe
+                    matching_rows = df[df["Employee Name"] == designer_name]
+                    if not matching_rows.empty and "Work Email" in matching_rows.columns:
+                        email = matching_rows.iloc[0]["Work Email"]
+                        email_to_teams_id[email] = teams_id
+                
+                # Create a new column for Microsoft IDs
+                df["Microsoft ID"] = df["Work Email"].map(email_to_teams_id)
+            
+            logger.info(f"Successfully loaded employee data with {len(df)} rows")
+            return df
+        else:
+            logger.error(f"Employee data file not found: {csv_path}")
+            return None
+    except Exception as e:
+        error_details = traceback.format_exc()
+        logger.error(f"Error loading employee data: {e}\n{error_details}")
+        return None
+    
+def update_designer_mappings_from_csv():
+    """Update designer email and Teams ID mappings from CSV data"""
+    if st.session_state.employee_data is None:
+        logger.warning("Cannot update designer mappings: employee data not available")
+        return
+        
+    df = st.session_state.employee_data
+    
+    # Update designer email mappings
+    for _, row in df.iterrows():
+        if pd.notna(row["Employee Name"]) and pd.notna(row["Work Email"]):
+            st.session_state.designer_email_mapping[row["Employee Name"]] = row["Work Email"]
+    
+    # Update Microsoft Teams ID mappings if available
+    if "Microsoft ID" in df.columns:
+        for _, row in df.iterrows():
+            if pd.notna(row["Employee Name"]) and pd.notna(row["Microsoft ID"]):
+                st.session_state.designer_teams_id_mapping[row["Employee Name"]] = row["Microsoft ID"]
+                
+    logger.info(f"Updated designer mappings from CSV data: {len(st.session_state.designer_email_mapping)} emails, {len(st.session_state.designer_teams_id_mapping)} Teams IDs")
+# Load employee data at startup
+st.session_state.employee_data = load_employee_data()
+if st.session_state.employee_data is None:
+    logger.warning("Failed to load employee data at startup. Some features may not work correctly.")
+
+# Call update_designer_mappings_from_csv() after loading employee data
+if st.session_state.employee_data is not None:
+    update_designer_mappings_from_csv()
+
 
 def send_designer_notification(designer_name, designer_teams_id, tasks):
     """Send a notification to a designer"""
@@ -829,23 +903,20 @@ def send_designer_email(
 
 # Add these functions after send_designer_email function (around line 487)
 def load_employee_manager_mapping():
-    """Load employee-manager relationships from Excel file"""
+    """Load employee-manager relationships from preloaded employee data"""
     try:
-        # The file is already in the app directory
-        excel_path = "uhd_data.xlsx"
-        
-        # Check if file exists
-        if not os.path.exists(excel_path):
-            logger.error(f"Employee mapping file not found: {excel_path}")
+        if st.session_state.employee_data is None:
+            # Try loading again if not already loaded
+            st.session_state.employee_data = load_employee_data()
+            
+        if st.session_state.employee_data is None:
+            logger.error("Cannot load employee-manager mapping: employee data not available")
             return {}
-        
-        # Load Excel
-        df = pd.read_excel(excel_path)
-        
-        # Create mapping dictionary
-        mapping = {}
+            
+        df = st.session_state.employee_data
         
         # Process each employee row
+        mapping = {}
         for _, row in df.iterrows():
             try:
                 employee_name = row["Employee Name"]
@@ -858,8 +929,7 @@ def load_employee_manager_mapping():
                     if not manager_row.empty and pd.notna(manager_row.iloc[0]["Work Email"]):
                         manager_email = manager_row.iloc[0]["Work Email"]
                     else:
-                        # If manager not found in dataframe, use a default email
-                        logger.warning(f"Could not find email for manager {manager_name} of {employee_name}")
+                        logger.warning(f"Could not find email for manager '{manager_name}' of employee '{employee_name}'")
                         continue
                     
                     # Store the mapping with the employee name as the key
@@ -881,12 +951,16 @@ def load_employee_manager_mapping():
 def send_manager_email(manager_name, manager_email, designers_tasks, selected_date):
     """Send email to a manager about their team's missing timesheets"""
     try:
+        logger.info(f"Preparing email for manager: {manager_name} ({manager_email})")
+        
         # Determine if any tasks are more than 1 day overdue
         max_days_overdue = 0
         for designer_tasks in designers_tasks.values():
             for task in designer_tasks:
                 days_overdue = task.get("Days Overdue", 0)
                 max_days_overdue = max(max_days_overdue, days_overdue)
+        
+        logger.info(f"Maximum days overdue for any task: {max_days_overdue}")
         
         # Set email subject and greeting based on days overdue
         if max_days_overdue >= 2:
@@ -900,13 +974,19 @@ def send_manager_email(manager_name, manager_email, designers_tasks, selected_da
             intro_text = f"The following team members haven't logged their hours for tasks assigned on <b>{selected_date.strftime('%Y-%m-%d')}</b>:"
             closing = "Reminders have already been sent to the individuals. Kindly follow up as needed to ensure all hours are logged promptly.\n\nLet us know if you need anything else."
         
+        logger.info(f"Email subject: {subject}")
+        
         # Create email
         msg = MIMEMultipart('alternative')
         msg['From'] = st.session_state.smtp_username
         msg['To'] = manager_email
         msg['Subject'] = subject
         
-        # Create HTML version
+        # Log the SMTP details being used
+        logger.info(f"Using SMTP server: {st.session_state.smtp_server}:{st.session_state.smtp_port}")
+        logger.info(f"Using SMTP username: {st.session_state.smtp_username}")
+        
+        # Email content creation logic remains the same
         html_body = f"""
         <html>
         <body>
@@ -980,22 +1060,44 @@ def send_manager_email(manager_name, manager_email, designers_tasks, selected_da
         msg.attach(MIMEText(text_body, 'plain'))
         msg.attach(MIMEText(html_body, 'html'))
         
-        # Send email
-        server = smtplib.SMTP(st.session_state.smtp_server, st.session_state.smtp_port)
-        server.starttls()
-        server.login(st.session_state.smtp_username, st.session_state.smtp_password)
-        server.send_message(msg)
-        server.quit()
-        
-        logger.info(f"Manager notification sent to {manager_name} ({manager_email})")
-        return True
+        # Send email with detailed error handling
+        try:
+            logger.info(f"Connecting to SMTP server {st.session_state.smtp_server}:{st.session_state.smtp_port}")
+            server = smtplib.SMTP(st.session_state.smtp_server, st.session_state.smtp_port)
+            server.set_debuglevel(1)  # Enable SMTP debug output
+            
+            logger.info("Starting TLS")
+            server.starttls()
+            
+            logger.info(f"Logging in with username: {st.session_state.smtp_username}")
+            server.login(st.session_state.smtp_username, st.session_state.smtp_password)
+            
+            logger.info(f"Sending email to: {manager_email}")
+            server.send_message(msg)
+            
+            logger.info("Quitting SMTP connection")
+            server.quit()
+            
+            logger.info(f"Manager notification sent to {manager_name} ({manager_email})")
+            return True
+        except smtplib.SMTPAuthenticationError as e:
+            logger.error(f"SMTP Authentication failed: {e}")
+            return False
+        except smtplib.SMTPException as e:
+            logger.error(f"SMTP error: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Unknown error sending email: {e}")
+            return False
     except Exception as e:
         error_details = traceback.format_exc()
-        logger.error(f"Error sending manager email: {e}\n{error_details}")
+        logger.error(f"Error preparing manager email: {e}\n{error_details}")
         return False
 
 def send_manager_notifications(designers, selected_date, reference_date=None):
     """Send email notifications to managers about their team members' missing timesheets"""
+    logger.info(f"Starting manager notifications for {len(designers)} designers")
+    
     if not st.session_state.email_enabled:
         logger.info("Email sending is disabled, skipping manager notifications")
         return False, 0, 0
@@ -1017,12 +1119,19 @@ def send_manager_notifications(designers, selected_date, reference_date=None):
         # Group tasks by manager
         managers_tasks = {}
         
+        # Debug log all designers
+        logger.info(f"Designers with missing timesheets: {list(designers.keys())}")
+        
         for designer, tasks in designers.items():
+            logger.info(f"Processing designer: '{designer}' with {len(tasks)} missing tasks")
+            
             # Find the manager for this designer
             if designer in employee_manager_mapping:
                 manager_info = employee_manager_mapping[designer]
                 manager_name = manager_info["manager_name"]
                 manager_email = manager_info["manager_email"]
+                
+                logger.info(f"Found manager for '{designer}': {manager_name} ({manager_email})")
                 
                 if manager_name not in managers_tasks:
                     managers_tasks[manager_name] = {
@@ -1034,14 +1143,24 @@ def send_manager_notifications(designers, selected_date, reference_date=None):
                     managers_tasks[manager_name]["designers"][designer] = []
                 
                 managers_tasks[manager_name]["designers"][designer].extend(tasks)
+                logger.info(f"Added {len(tasks)} tasks for '{designer}' to manager '{manager_name}'")
             else:
-                logger.warning(f"No manager found for {designer}")
+                logger.warning(f"No manager found for designer '{designer}' - check name spelling in data file")
         
         # Send emails to managers
         success_count = 0
         fail_count = 0
         
+        logger.info(f"Preparing to send emails to {len(managers_tasks)} managers")
+        
         for manager_name, manager_data in managers_tasks.items():
+            logger.info(f"Sending email to manager: {manager_name} ({manager_data['email']})")
+            logger.info(f"Email will include {len(manager_data['designers'])} team members with missing timesheets")
+            
+            # List the team members for debugging
+            for designer_name, designer_tasks in manager_data["designers"].items():
+                logger.info(f"  - Designer: {designer_name} has {len(designer_tasks)} missing entries")
+            
             # Prepare email content
             email_sent = send_manager_email(
                 manager_name,
@@ -1051,10 +1170,13 @@ def send_manager_notifications(designers, selected_date, reference_date=None):
             )
             
             if email_sent:
+                logger.info(f"Successfully sent email to manager: {manager_name}")
                 success_count += 1
             else:
+                logger.error(f"Failed to send email to manager: {manager_name}")
                 fail_count += 1
         
+        logger.info(f"Manager notification summary: {success_count} successful, {fail_count} failed")
         return True, success_count, fail_count
     except Exception as e:
         error_details = traceback.format_exc()
@@ -1680,6 +1802,29 @@ def send_teams_webhook_notification(
 def main():
     st.title("Missing Timesheet Reporter (Planning-Focused)")
     
+    # Add a debug container that's initially hidden
+    if 'debug_container' not in st.session_state:
+        st.session_state.debug_container = None
+    if 'debug_messages' not in st.session_state:
+        st.session_state.debug_messages = []
+    
+    # Create a function to show debug info in the UI
+    def debug_print(message, level="info"):
+        """Add a debug message to be displayed in the UI"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        st.session_state.debug_messages.append({
+            "time": timestamp,
+            "message": message,
+            "level": level
+        })
+        # Also log to regular logger
+        if level == "error":
+            logger.error(message)
+        elif level == "warning":
+            logger.warning(message)
+        else:
+            logger.info(message)
+    
     # Create sidebar for options
     with st.sidebar:
         st.title("Options")
@@ -2057,7 +2202,29 @@ def main():
                         st.success("Connected successfully!")
                     else:
                         st.error("Failed to connect to Odoo")
-    
+        # Add CSV data status expander right before the Connection Settings expander
+        with st.sidebar.expander("CSV Data Status", expanded=False):
+            if st.session_state.employee_data is not None:
+                st.success(f"✅ Employee data loaded: {len(st.session_state.employee_data)} records")
+                st.text(f"Email mappings: {len(st.session_state.designer_email_mapping)}")
+                st.text(f"Teams ID mappings: {len(st.session_state.designer_teams_id_mapping)}")
+                
+                if st.button("Reload Data"):
+                    st.session_state.employee_data = load_employee_data()
+                    if st.session_state.employee_data is not None:
+                        update_designer_mappings_from_csv()
+                        st.success("Data reloaded successfully")
+                    else:
+                        st.error("Failed to reload data")
+            else:
+                st.error("❌ Employee data not loaded")
+                if st.button("Try Loading Data"):
+                    st.session_state.employee_data = load_employee_data()
+                    if st.session_state.employee_data is not None:
+                        update_designer_mappings_from_csv()
+                        st.success("Data loaded successfully")
+                    else:
+                        st.error("Failed to load data")
     # Main area content
     # Connection status
     if st.session_state.odoo_uid and st.session_state.odoo_models:
