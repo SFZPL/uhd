@@ -150,25 +150,11 @@ def load_employee_data():
             df = pd.read_csv(csv_path)
             
             # Verify required columns exist
-            required_columns = ["Employee Name", "Manager", "Work Email"]
+            required_columns = ["Employee Name", "Manager", "Work Email", "Microsoft ID"]
             missing_columns = [col for col in required_columns if col not in df.columns]
             if missing_columns:
                 logger.error(f"Required columns missing from CSV: {missing_columns}")
                 return None
-                
-            # Add Microsoft IDs from Teams mappings if available
-            if hasattr(st.secrets, "TEAMS_USER_IDS"):
-                # Create a lookup dictionary from email to Teams ID
-                email_to_teams_id = {}
-                for designer_name, teams_id in st.secrets.TEAMS_USER_IDS.items():
-                    # Try to find corresponding email in dataframe
-                    matching_rows = df[df["Employee Name"] == designer_name]
-                    if not matching_rows.empty and "Work Email" in matching_rows.columns:
-                        email = matching_rows.iloc[0]["Work Email"]
-                        email_to_teams_id[email] = teams_id
-                
-                # Create a new column for Microsoft IDs
-                df["Microsoft ID"] = df["Work Email"].map(email_to_teams_id)
             
             logger.info(f"Successfully loaded employee data with {len(df)} rows")
             return df
@@ -188,16 +174,19 @@ def update_designer_mappings_from_csv():
         
     df = st.session_state.employee_data
     
+    # Clear existing mappings to prioritize CSV data
+    st.session_state.designer_email_mapping = {}
+    st.session_state.designer_teams_id_mapping = {}
+    
     # Update designer email mappings
     for _, row in df.iterrows():
         if pd.notna(row["Employee Name"]) and pd.notna(row["Work Email"]):
             st.session_state.designer_email_mapping[row["Employee Name"]] = row["Work Email"]
     
-    # Update Microsoft Teams ID mappings if available
-    if "Microsoft ID" in df.columns:
-        for _, row in df.iterrows():
-            if pd.notna(row["Employee Name"]) and pd.notna(row["Microsoft ID"]):
-                st.session_state.designer_teams_id_mapping[row["Employee Name"]] = row["Microsoft ID"]
+    # Update Microsoft Teams ID mappings
+    for _, row in df.iterrows():
+        if pd.notna(row["Employee Name"]) and pd.notna(row["Microsoft ID"]):
+            st.session_state.designer_teams_id_mapping[row["Employee Name"]] = row["Microsoft ID"]
                 
     logger.info(f"Updated designer mappings from CSV data: {len(st.session_state.designer_email_mapping)} emails, {len(st.session_state.designer_teams_id_mapping)} Teams IDs")
 # Load employee data at startup
