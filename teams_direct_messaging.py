@@ -43,6 +43,7 @@ class TeamsMessenger:
     def notify_user(self, user_id, message_text):
         """
         Send notification by creating a chat with a descriptive topic
+        and sending an activity notification
         """
         logger.info(f"Starting notification process for user: {user_id}")
         
@@ -55,13 +56,63 @@ class TeamsMessenger:
         # Create notification chat
         chat_id = self._create_notification_chat(user_id, message_text)
         
+        # Send activity notification for better visibility
+        activity_sent = self._send_activity_notification(user_id, message_text)
+        
         if chat_id:
             logger.info(f"Notification chat created successfully: {chat_id}")
             return True
         else:
             logger.error("Could not create notification chat")
             return False
-    
+
+    def _send_activity_notification(self, user_id, message_text):
+        """Send an activity notification to the user"""
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json"
+            }
+            
+            # Extract urgency from message
+            is_urgent = "🔴" in message_text
+            
+            # Create a short preview of the message
+            preview = message_text[:50] + "..." if len(message_text) > 50 else message_text
+            
+            # Format the payload for activity notification
+            activity_data = {
+                "topic": {
+                    "source": "entityUrl",
+                    "value": "https://prezlab.sharepoint.com/sites/timesheets"
+                },
+                "activityType": "timesheetReminder",
+                "previewText": {
+                    "content": preview
+                },
+                "templateParameters": [
+                    {
+                        "name": "message",
+                        "value": message_text
+                    }
+                ]
+            }
+            
+            url = f"https://graph.microsoft.com/v1.0/users/{user_id}/teamwork/sendActivityNotification"
+            logger.info(f"Sending activity notification to user: {user_id}")
+            
+            response = requests.post(url, headers=headers, json=activity_data)
+            
+            if response.status_code == 204:  # Success returns no content
+                logger.info(f"Activity notification sent successfully to user: {user_id}")
+                return True
+            else:
+                logger.error(f"Error sending activity notification: {response.status_code} - {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"Exception sending activity notification: {str(e)}", exc_info=True)
+            return False
+        
     def _create_notification_chat(self, user_id, message_text):
         """Create a chat with the notification as the topic"""
         try:
