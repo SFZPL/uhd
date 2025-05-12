@@ -58,18 +58,18 @@ if 'last_error' not in st.session_state:
     st.session_state.last_error = None
 # Email settings
 if 'email_enabled' not in st.session_state:
-    st.session_state.email_enabled = False
+    st.session_state.email_enabled = True
 if 'email_recipient' not in st.session_state:
     st.session_state.email_recipient = odoo_username  # Default to the Odoo username (usually an email)
 if 'designer_emails_enabled' not in st.session_state:
-    st.session_state.designer_emails_enabled = False
+    st.session_state.designer_emails_enabled = True
 if 'designer_email_mapping' not in st.session_state:
     st.session_state.designer_email_mapping = {}
 if 'smtp_server' not in st.session_state:
     st.session_state.smtp_server = "smtp.gmail.com"
 # Add after the email settings initialization (around line 50-70)
 if 'manager_emails_enabled' not in st.session_state:
-    st.session_state.manager_emails_enabled = False
+    st.session_state.manager_emails_enabled = True
 # Email settings
 if 'smtp_port' not in st.session_state:
     st.session_state.smtp_port = 587
@@ -87,7 +87,7 @@ if 'test_webhook_url' not in st.session_state:
     st.session_state.test_webhook_url = ""
 # Teams direct messaging settings
 if 'teams_direct_msg_enabled' not in st.session_state:
-    st.session_state.teams_direct_msg_enabled = False
+    st.session_state.teams_direct_msg_enabled = True
 if 'azure_client_id' not in st.session_state:
     st.session_state.azure_client_id = ""
 if 'azure_client_secret' not in st.session_state:
@@ -2300,7 +2300,7 @@ def main():
     with col1:
         selected_date = st.date_input(
             "Select End Date", 
-            datetime.now().date() - timedelta(days=1),  # Default to yesterday
+            datetime.now().date(),  # Default to yesterday
             help="Choose the end date for the report range (reference date to this date)"
         )
     
@@ -2452,6 +2452,46 @@ def main():
     
     Add this command to your server's cron jobs or task scheduler.
     """)
+    # Automatic Scheduling Configuration
+    st.subheader("Automatic Scheduling Configuration")
+
+    # Container for scheduling settings
+    schedule_container = st.container()
+    with schedule_container:
+        # Initialize session state variables for scheduling if they don't exist
+        if 'auto_scheduling_enabled' not in st.session_state:
+            st.session_state.auto_scheduling_enabled = False
+        if 'auto_schedule_time' not in st.session_state:
+            st.session_state.auto_schedule_time = "09:00"
+        
+        # UI elements for scheduling
+        enable_col, time_col = st.columns([1, 2])
+        
+        with enable_col:
+            auto_scheduling = st.checkbox("Enable Auto-Scheduling", 
+                                        value=st.session_state.auto_scheduling_enabled,
+                                        help="When enabled, the system will attempt to run reports automatically")
+        
+        with time_col:
+            schedule_time = st.time_input("Daily Run Time", 
+                                        value=datetime.strptime(st.session_state.auto_schedule_time, "%H:%M").time(),
+                                        help="Time to run the report daily")
+        
+        # Save settings button
+        if st.button("Save Scheduling Settings"):
+            st.session_state.auto_scheduling_enabled = auto_scheduling
+            st.session_state.auto_schedule_time = schedule_time.strftime("%H:%M")
+            
+            # Generate the URL for scheduling
+            base_url = st.experimental_get_query_params().get("base_url", ["https://prezlab-uhd.streamlit.app"])[0]
+            schedule_url = f"{base_url}?headless=true&date=today&email=true&designer_emails=true&shift_status=planned"
+            
+            if auto_scheduling:
+                st.success(f"Automatic scheduling enabled! Reports will run daily at {schedule_time.strftime('%H:%M')}.")
+                st.info("Use this URL with an external scheduler service like cron-job.org:")
+                st.code(schedule_url)
+            else:
+                st.warning("Automatic scheduling is disabled.")
 
 if __name__ == "__main__":
     # Check if running in headless mode with command-line arguments
