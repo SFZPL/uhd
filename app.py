@@ -1789,7 +1789,7 @@ def send_teams_webhook_notification(
 
 
 def main():
-    params = st.experimental_get_query_params()
+    params = st.query_params()
     if "headless" in params:
         st.session_state.headless_mode = True
         if "date" in params:
