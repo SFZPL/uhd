@@ -1,0 +1,16 @@
+name: Daily Timesheet Report
+
+on:
+  schedule:
+    - cron: '17 23 * * *'  # Runs at 13:17 UTC daily
+  workflow_dispatch:  # Allows manual triggering from GitHub UI
+
+jobs:
+  trigger-timesheet-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Streamlit App Headless Mode
+        run: |
+          # Make curl follow redirects and show detailed info
+          curl -L -v "https://prezlab-uhd.streamlit.app/?headless=true&date=today&email=true&designer_emails=true&shift_status=planned"
+          echo "Timesheet report generation triggered"
