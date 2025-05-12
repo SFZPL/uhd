@@ -2482,8 +2482,8 @@ def main():
             st.session_state.auto_scheduling_enabled = auto_scheduling
             st.session_state.auto_schedule_time = schedule_time.strftime("%H:%M")
             
-            # Generate the URL for scheduling
-            base_url = st.experimental_get_query_params().get("base_url", ["https://prezlab-uhd.streamlit.app"])[0]
+            # Use a hardcoded app URL
+            base_url = "https://prezlab-uhd.streamlit.app"
             schedule_url = f"{base_url}?headless=true&date=today&email=true&designer_emails=true&shift_status=planned"
             
             if auto_scheduling:
@@ -2492,7 +2492,6 @@ def main():
                 st.code(schedule_url)
             else:
                 st.warning("Automatic scheduling is disabled.")
-
 if __name__ == "__main__":
     # Check if running in headless mode with command-line arguments
     import sys
