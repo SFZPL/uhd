@@ -1495,11 +1495,11 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     'Project': str(project_name),
                     'Client Success Member': str(client_success_name),
                     'Task': str(task_name),
-                    'Slot Name': str(slot_name),
+                    # 'Slot Name': str(slot_name),
                     'Start Time': str(start_time),
                     'End Time': str(end_time),
                     'Allocated Hours': float(allocated_hours),
-                    'Shift Status': str(shift_status),
+                    # 'Shift Status': str(shift_status),
                     'Days Overdue': int(days_since_task),
                     'Urgency': 'High' if days_since_task >= 2 else ('Medium' if days_since_task == 1 else 'Low')
                 }
@@ -1709,8 +1709,8 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
         else:
             # Return empty DataFrame with columns
             empty_df = pd.DataFrame(columns=[
-                'Date', 'Designer', 'Project', 'Client Success Member', 'Task', 'Slot Name', 
-                'Start Time', 'End Time', 'Allocated Hours', 'Shift Status', 'Days Overdue', 'Urgency'
+                'Date', 'Designer', 'Project', 'Client Success Member', 'Task', 
+                'Start Time', 'End Time', 'Allocated Hours', 'Days Overdue', 'Urgency'
             ])
             
             # Send email for empty report if requested
@@ -1789,6 +1789,61 @@ def send_teams_webhook_notification(
 
 
 def main():
+    params = st.experimental_get_query_params()
+    if "headless" in params:
+        st.session_state.headless_mode = True
+        if "date" in params:
+            date_param = params["date"][0]
+            if date_param == "today":
+                report_date = datetime.now().date()
+            else:
+                try:
+                    report_date = datetime.strptime(date_param, "%Y-%m-%d").date()
+                except ValueError:
+                    report_date = datetime.now().date()
+        else:
+            report_date = datetime.now().date()
+            
+        # Set params based on URL parameters
+        send_email = "email" in params and params["email"][0].lower() == "true"
+        send_designer_emails = "designer_emails" in params and params["designer_emails"][0].lower() == "true"
+        
+        if "shift_status" in params:
+            shift_status = params["shift_status"][0].lower()
+            if shift_status == "all":
+                shift_status_filter = None
+            elif shift_status == "forecasted":
+                shift_status_filter = "Forecasted"
+            else:
+                shift_status_filter = "Planned"
+        else:
+            shift_status_filter = "Planned"
+        
+        # Connect to Odoo and run the report
+        uid, models = authenticate_odoo(
+            st.session_state.odoo_url,
+            st.session_state.odoo_db,
+            st.session_state.odoo_username,
+            st.session_state.odoo_password
+        )
+        
+        if uid and models:
+            st.session_state.odoo_uid = uid
+            st.session_state.odoo_models = models
+            
+            # Generate report and send email
+            df, missing_count, timesheet_count = generate_missing_timesheet_report(
+                report_date, 
+                shift_status_filter,
+                send_email,
+                send_designer_emails
+            )
+            
+            st.write("Headless report generated successfully")
+            st.write(f"Found {missing_count} missing entries out of {timesheet_count} timesheet entries")
+            # Add an early return to skip the rest of the UI rendering
+            return
+
     st.title("Missing Timesheet Reporter (Planning-Focused)")
     
     # Add a debug container that's initially hidden
