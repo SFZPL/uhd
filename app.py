@@ -135,7 +135,9 @@ if hasattr(st.secrets, "EMAIL"):
         st.session_state.smtp_username = st.secrets.EMAIL.SMTP_USERNAME
     if "SMTP_PASSWORD" in st.secrets.EMAIL and not st.session_state.smtp_password:
         st.session_state.smtp_password = st.secrets.EMAIL.SMTP_PASSWORD
-# Add this code near the beginning of your app, after initializing session state variables
+
+if 'current_page' not in st.session_state:
+    st.session_state.current_page = "Missing Timesheet Reporter"
 
 # Initialize data container
 if 'employee_data' not in st.session_state:
@@ -796,6 +798,10 @@ def send_designer_email(
 
         one_day  = (max_days_overdue == 1)
         two_plus = (max_days_overdue >= 2)
+        
+        # -- Get the first name only -----------------------------------------
+        # Extract first name from the full name
+        first_name = designer_name.split()[0] if designer_name else "there"
 
         if one_day:
             subj = "Quick Nudge – Log Your Hours"
@@ -822,10 +828,11 @@ def send_designer_email(
 
         tasks_html = "".join(format_task(t) for t in tasks)
 
+        # Use first name instead of full name
         greeting = (
-            f"<p>Hi {designer_name},</p>"
+            f"<p>Hi {first_name},</p>"
             if one_day
-            else f"<p>Hi {designer_name},</p>"
+            else f"<p>Hi {first_name},</p>"
         )
 
         intro = ("""
@@ -942,6 +949,9 @@ def send_manager_email(manager_name, manager_email, designers_tasks, selected_da
     try:
         logger.info(f"Preparing email for manager: {manager_name} ({manager_email})")
         
+        # Get the first name only
+        first_name = manager_name.split()[0] if manager_name else "there"
+        
         # Determine if any tasks are more than 1 day overdue
         max_days_overdue = 0
         for designer_tasks in designers_tasks.values():
@@ -953,13 +963,13 @@ def send_manager_email(manager_name, manager_email, designers_tasks, selected_da
         
         # Set email subject and greeting based on days overdue
         if max_days_overdue >= 2:
-            subject = f"Urgent: Team Members Haven't Logged Hours for 2 Days - Via Teams"
-            greeting = f"Hi {manager_name},"
+            subject = f"Urgent: Team Members Haven't Logged Hours for 2 Days"
+            greeting = f"Hi {first_name},"
             intro_text = "We've noticed that the following team members have <b>not logged their hours for 2 consecutive days</b> on assigned tasks. This is creating delays in tracking and reporting:"
             closing = "This needs immediate follow-up. Please address this with your team and make sure all pending hours are logged without further delay.\n\nLet us know if any blockers are preventing this from happening."
         else:
-            subject = f"Unlogged Hours Report – {selected_date.strftime('%Y-%m-%d')} - Via Teams"
-            greeting = f"Hi {manager_name},"
+            subject = f"Unlogged Hours Report – {selected_date.strftime('%Y-%m-%d')}"
+            greeting = f"Hi {first_name},"
             intro_text = f"The following team members haven't logged their hours for tasks assigned on <b>{selected_date.strftime('%Y-%m-%d')}</b>:"
             closing = "Reminders have already been sent to the individuals. Kindly follow up as needed to ensure all hours are logged promptly.\n\nLet us know if you need anything else."
         
