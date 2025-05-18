@@ -489,7 +489,7 @@ def get_planning_slots(models, uid, odoo_db, odoo_password, start_date, end_date
         desired_fields = [
             'id', 'name', 'resource_id', 'start_datetime', 'end_datetime', 
             'allocated_hours', 'state', 'project_id', 'task_id', 'x_studio_shift_status',
-            'create_uid', 'x_studio_sub_task_1', 'x_studio_task_activity', 'x_studio_service_category_1'
+            'create_uid', 'x_studio_sub_task_1', 'x_studio_task_activity', 'x_studio_service_category_1', 'x_studio_sub_task_link' 
         ]
         
         # Only request fields that exist
@@ -818,9 +818,18 @@ def send_designer_email(
         # Build HTML body
         # --------------------------------------------------------------------
         def format_task(t):
+            task_name = t.get('Task', 'Unknown')
+            task_link = t.get('Sub_Task_Link', '')
+            
+            # Create a linked task name if we have a valid link
+            if task_link and isinstance(task_link, str) and (task_link.startswith('http') or task_link.startswith('/')):
+                task_display = f'<a href="{task_link}" target="_blank">{task_name}</a>'
+            else:
+                task_display = task_name
+                
             return f"""
             <tr>
-                <td>{t.get('Task', 'Unknown')}</td>
+                <td>{task_display}</td>
                 <td>{t.get('Project', 'Unknown')}</td>
                 <td>{t.get('Date', '—')}</td>
                 <td>{t.get('Client Success Member', 'Unknown')}</td>
@@ -1490,7 +1499,15 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
             else:
                 # Fallback if no valid start_datetime
                 task_date = selected_date
-                
+
+            # Add this code:
+            # Get sub task link
+            sub_task_link = slot.get('x_studio_sub_task_link', '')
+            if isinstance(sub_task_link, list) and len(sub_task_link) > 1:
+                sub_task_link = sub_task_link[1]  # Get the URL if it's a relation field
+            elif isinstance(sub_task_link, bool):
+                sub_task_link = ""
+
             # Calculate days since task date for urgency
             reference_point = selected_date
             days_since_task = (reference_point - task_date).days
@@ -1511,7 +1528,8 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     'Allocated Hours': float(allocated_hours),
                     # 'Shift Status': str(shift_status),
                     'Days Overdue': int(days_since_task),
-                    'Urgency': 'High' if days_since_task >= 2 else ('Medium' if days_since_task == 1 else 'Low')
+                    'Urgency': 'High' if days_since_task >= 2 else ('Medium' if days_since_task == 1 else 'Low'),
+                    'Sub_Task_Link': str(sub_task_link)  # Add this line
                 }
                 
                 report_data.append(task_data)
