@@ -821,18 +821,18 @@ def send_designer_email(
             task_name = t.get('Task', 'Unknown')
             task_link = t.get('Sub_Task_Link', '')
             
-            # Create a linked task name if we have a valid link
+            # Format the link as a separate column
+            link_display = ""
             if task_link and isinstance(task_link, str) and (task_link.startswith('http') or task_link.startswith('/')):
-                task_display = f'<a href="{task_link}" target="_blank">{task_name}</a>'
-            else:
-                task_display = task_name
+                link_display = f'<a href="{task_link}" target="_blank">Open Task</a>'
                 
             return f"""
             <tr>
-                <td>{task_display}</td>
+                <td>{task_name}</td>
                 <td>{t.get('Project', 'Unknown')}</td>
                 <td>{t.get('Date', '—')}</td>
                 <td>{t.get('Client Success Member', 'Unknown')}</td>
+                <td>{link_display}</td>
             </tr>"""
 
         tasks_html = "".join(format_task(t) for t in tasks)
@@ -875,6 +875,7 @@ def send_designer_email(
                     <th>Project</th>
                     <th>Assigned on / Dates</th>
                     <th>Client-Success Contact</th>
+                    <th>Link</th>
                 </tr>
             </thead>
             <tbody>
