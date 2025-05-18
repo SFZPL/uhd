@@ -821,11 +821,23 @@ def send_designer_email(
             task_name = t.get('Task', 'Unknown')
             task_link = t.get('Sub_Task_Link', '')
             
-            # Format the link as a separate column
-            link_display = ""
-            if task_link and isinstance(task_link, str) and (task_link.startswith('http') or task_link.startswith('/')):
-                link_display = f'<a href="{task_link}" target="_blank">Open Task</a>'
-                
+            # Debug the link value
+            logger.info(f"Task: {task_name}, Link value: {task_link}, Type: {type(task_link)}")
+            
+            # Be more permissive with link display - show the link or a debug message
+            link_display = "No link available"
+            if task_link:
+                # Always show some form of the link regardless of format
+                if isinstance(task_link, str):
+                    if task_link.startswith('http') or task_link.startswith('/'):
+                        link_display = f'<a href="{task_link}" target="_blank">Open Task</a>'
+                    else:
+                        # Handle non-URL string values
+                        link_display = f'{task_link}'
+                else:
+                    # Handle non-string values
+                    link_display = f'Link type: {type(task_link)}'
+            
             return f"""
             <tr>
                 <td>{task_name}</td>
@@ -1501,14 +1513,33 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                 # Fallback if no valid start_datetime
                 task_date = selected_date
 
-            # Add this code:
             # Get sub task link
             sub_task_link = slot.get('x_studio_sub_task_link', '')
-            if isinstance(sub_task_link, list) and len(sub_task_link) > 1:
-                sub_task_link = sub_task_link[1]  # Get the URL if it's a relation field
-            elif isinstance(sub_task_link, bool):
-                sub_task_link = ""
+            logger.info(f"Original sub_task_link: {sub_task_link}, Type: {type(sub_task_link)}")
 
+            # Handle different formats of the sub_task_link field
+            if isinstance(sub_task_link, list):
+                if len(sub_task_link) > 1:
+                    sub_task_link = sub_task_link[1]  # Get the URL if it's a relation field
+                    logger.info(f"Extracted link from list: {sub_task_link}")
+                elif len(sub_task_link) == 1:
+                    sub_task_link = sub_task_link[0]
+                    logger.info(f"Extracted single item from list: {sub_task_link}")
+                else:
+                    sub_task_link = ""
+            elif isinstance(sub_task_link, bool) or sub_task_link is None:
+                sub_task_link = ""
+            elif isinstance(sub_task_link, dict) and 'url' in sub_task_link:
+                sub_task_link = sub_task_link['url']
+                logger.info(f"Extracted URL from dict: {sub_task_link}")
+
+            # Ensure we have a valid URL format if it's not empty
+            if sub_task_link and isinstance(sub_task_link, str):
+                # Add the protocol if missing but looks like a URL
+                if not (sub_task_link.startswith('http') or sub_task_link.startswith('/')):
+                    if '.' in sub_task_link and not sub_task_link.startswith('www.'):
+                        sub_task_link = 'https://' + sub_task_link
+                        logger.info(f"Added https:// to link: {sub_task_link}")
             # Calculate days since task date for urgency
             reference_point = selected_date
             days_since_task = (reference_point - task_date).days
