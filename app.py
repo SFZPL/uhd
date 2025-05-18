@@ -821,22 +821,11 @@ def send_designer_email(
             task_name = t.get('Task', 'Unknown')
             task_link = t.get('Sub_Task_Link', '')
             
-            # Debug the link value
-            logger.info(f"Task: {task_name}, Link value: {task_link}, Type: {type(task_link)}")
-            
-            # Be more permissive with link display - show the link or a debug message
-            link_display = "No link available"
-            if task_link:
-                # Always show some form of the link regardless of format
-                if isinstance(task_link, str):
-                    if task_link.startswith('http') or task_link.startswith('/'):
-                        link_display = f'<a href="{task_link}" target="_blank">Open Task</a>'
-                    else:
-                        # Handle non-URL string values
-                        link_display = f'{task_link}'
-                else:
-                    # Handle non-string values
-                    link_display = f'Link type: {type(task_link)}'
+            # Format the link as a separate column
+            link_display = "No link"
+            if task_link and isinstance(task_link, str):
+                if task_link.startswith('http') or task_link.startswith('/'):
+                    link_display = f'<a href="{task_link}" target="_blank">Open Task</a>'
             
             return f"""
             <tr>
@@ -1514,24 +1503,21 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                 task_date = selected_date
 
             # Get sub task link
-            sub_task_link = slot.get('x_studio_sub_task_link', '')
+            sub_task_link = ""
+            raw_sub_task_link = slot.get('x_studio_sub_task_link', False)
             logger.info(f"Original sub_task_link: {sub_task_link}, Type: {type(sub_task_link)}")
 
-            # Handle different formats of the sub_task_link field
-            if isinstance(sub_task_link, list):
-                if len(sub_task_link) > 1:
-                    sub_task_link = sub_task_link[1]  # Get the URL if it's a relation field
-                    logger.info(f"Extracted link from list: {sub_task_link}")
-                elif len(sub_task_link) == 1:
-                    sub_task_link = sub_task_link[0]
-                    logger.info(f"Extracted single item from list: {sub_task_link}")
-                else:
-                    sub_task_link = ""
-            elif isinstance(sub_task_link, bool) or sub_task_link is None:
-                sub_task_link = ""
-            elif isinstance(sub_task_link, dict) and 'url' in sub_task_link:
-                sub_task_link = sub_task_link['url']
-                logger.info(f"Extracted URL from dict: {sub_task_link}")
+            # If we have a valid relation field, construct a proper Odoo URL
+            if isinstance(raw_sub_task_link, list) and len(raw_sub_task_link) > 0:
+                sub_task_id = raw_sub_task_link[0]  # Get the ID (first element)
+                if sub_task_id:
+                    # Construct Odoo task URL
+                    base_url = st.session_state.odoo_url
+                    sub_task_link = f"{base_url}/web#id={sub_task_id}&model=project.task&view_type=form"
+                    logger.info(f"Constructed Odoo URL for task: {sub_task_link}")
+            else:
+                # Use the original handling for other cases
+                sub_task_link = raw_sub_task_link
 
             # Ensure we have a valid URL format if it's not empty
             if sub_task_link and isinstance(sub_task_link, str):
