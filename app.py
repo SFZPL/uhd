@@ -1476,6 +1476,7 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                 try:
                     # Convert string to datetime
                     start_dt = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M:%S")
+                    start_dt = start_dt + timedelta(hours=3)
                     start_time = start_dt.strftime("%H:%M")
                 except:
                     start_time = start_datetime
@@ -1484,6 +1485,7 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                 try:
                     # Convert string to datetime
                     end_dt = datetime.strptime(end_datetime, "%Y-%m-%d %H:%M:%S")
+                    end_dt = end_dt + timedelta(hours=3)
                     end_time = end_dt.strftime("%H:%M")
                 except:
                     end_time = end_datetime
@@ -1503,8 +1505,25 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
             else:
                 # Fallback if no valid start_datetime
                 task_date = selected_date
-
-            # Get sub task link
+            # Calculate daily allocated hours for this specific date
+            daily_allocated_hours = allocated_hours
+            if start_datetime and end_datetime and isinstance(start_datetime, str) and isinstance(end_datetime, str):
+                try:
+                    # Parse the start and end times
+                    start_dt = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M:%S")
+                    end_dt = datetime.strptime(end_datetime, "%Y-%m-%d %H:%M:%S")
+                    
+                    # Calculate the total duration in days (including partial days)
+                    total_days = (end_dt - start_dt).total_seconds() / (24 * 3600)
+                    
+                    # Only adjust allocation if task spans multiple days (more than 1 day)
+                    if total_days > 1.0:
+                        # Divide the total hours by the number of days (simple approach)
+                        daily_allocated_hours = allocated_hours / total_days
+                        logger.info(f"Task spans {total_days:.2f} days. Adjusted allocated hours from {allocated_hours} to {daily_allocated_hours:.2f} per day")
+                except Exception as e:
+                    logger.warning(f"Error calculating daily hours: {e}")
+                        # Get sub task link
             sub_task_link = ""
             raw_sub_task_link = slot.get('x_studio_sub_task_link', False)
             logger.info(f"Original sub_task_link: {sub_task_link}, Type: {type(sub_task_link)}")
@@ -1575,7 +1594,7 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     # 'Slot Name': str(slot_name),
                     'Start Time': str(start_time),
                     'End Time': str(end_time),
-                    'Allocated Hours': float(allocated_hours),
+                    'Allocated Hours': float(daily_allocated_hours),
                     # 'Shift Status': str(shift_status),
                     'Days Overdue': int(days_since_task),
                     'Urgency': 'High' if days_since_task >= 2 else ('Medium' if days_since_task == 1 else 'Low'),
