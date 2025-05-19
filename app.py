@@ -1513,9 +1513,10 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     start_dt = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M:%S")
                     end_dt = datetime.strptime(end_datetime, "%Y-%m-%d %H:%M:%S")
                     
-                    # Calculate the total duration in days (including partial days)
-                    total_days = (end_dt - start_dt).total_seconds() / (24 * 3600)
-                    
+                    # Calculate the number of work days (each calendar day counts as one full day)
+                    start_date = start_dt.date()
+                    end_date = end_dt.date()
+                    total_days = (end_date - start_date).days + 1  # +1 to include both start and end dates                    
                     # Only adjust allocation if task spans multiple days (more than 1 day)
                     if total_days > 1.0:
                         # Divide the total hours by the number of days (simple approach)
