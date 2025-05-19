@@ -846,22 +846,24 @@ def send_designer_email(
         )
 
         intro = ("""
-            This is a gentle reminder to log your hours for the task below — 
+            This is a gentle reminder to log your hours for the task and date below — 
             it takes a minute, but the impact is big:
         """ if one_day else """
             It looks like no hours have been logged for the past two days
-            for the following task:
+            for the following task and date:
         """)
 
         outro = ("""
             <p>Taking a minute now helps us stay on top of things later 🙌</p>
             <p>Let us know if you need any support with this.</p>
+            <p><strong>Important:</strong> For multi-day tasks, please log your hours separately for <em>each day</em> you work on the task.</p>
         """ if one_day else """
             <p>We completely understand things can get busy — but consistent
             time logging helps us improve project planning and smooth
             reporting.</p>
             <p>If something's holding you back from logging your hours,
             just reach out. We're here to help.</p>
+            <p><strong>Important:</strong> For multi-day tasks, please log your hours separately for <em>each day</em> you work on the task.</p>
         """)
 
         body = f"""
@@ -1431,20 +1433,20 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                 # Only consider it a valid timesheet if hours logged are greater than 0
                 # AND the entry was created by the designer (their user_id is in the user_ids set)
                 user_ids = resource_task_to_timesheet[key]['user_ids']
-                has_timesheet = (hours_logged > 0) and (resource_user_id in user_ids if resource_user_id else False)
+                has_timesheet = specific_date_has_timesheet
             
-            # Second check: try matching by name + task_id + project_id
-            if not has_timesheet and resource_name != "Unknown":
-                name_key = (resource_name, task_id, project_id)
-                if name_key in designer_name_to_timesheet:
-                    hours_logged = designer_name_to_timesheet[name_key]['hours']
-                    has_timesheet = hours_logged > 0
+            # # Second check: try matching by name + task_id + project_id
+            # if not has_timesheet and resource_name != "Unknown":
+            #     name_key = (resource_name, task_id, project_id)
+            #     if name_key in designer_name_to_timesheet:
+            #         hours_logged = designer_name_to_timesheet[name_key]['hours']
+            #         has_timesheet = hours_logged > 0
             
-            # Last resort: check if designer has ANY timesheet for the day
-            if not has_timesheet and resource_name != "Unknown":
-                if resource_name in designer_name_only_to_timesheet:
-                    hours_logged = designer_name_only_to_timesheet[resource_name]['hours']
-                    has_timesheet = hours_logged > 0
+            # # Last resort: check if designer has ANY timesheet for the day
+            # if not has_timesheet and resource_name != "Unknown":
+            #     if resource_name in designer_name_only_to_timesheet:
+            #         hours_logged = designer_name_only_to_timesheet[resource_name]['hours']
+            #         has_timesheet = hours_logged > 0
             
             # Get other slot info for display
             slot_name = slot.get('name', 'Unnamed Slot')
@@ -1518,7 +1520,37 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
             else:
                 # Use the original handling for other cases
                 sub_task_link = raw_sub_task_link
+            # For multi-day tasks, we need to check timesheet entries for the specific day
+            specific_date_has_timesheet = False
 
+            # Only consider timesheet entries for the exact day of this slot
+            date_specific_entries = []
+            if task_date:
+                formatted_task_date = task_date.strftime("%Y-%m-%d")
+                
+                # If this is a matching resource_id, task_id, project_id combination
+                key = (resource_id, task_id, project_id)
+                if key in resource_task_to_timesheet:
+                    # Filter entries by this specific date
+                    for entry in resource_task_to_timesheet[key]['entries']:
+                        entry_date = entry.get('date', '')
+                        if entry_date == formatted_task_date:
+                            date_specific_entries.append(entry)
+                            
+                    # Only consider it a valid timesheet if there are entries for THIS date
+                    specific_date_has_timesheet = len(date_specific_entries) > 0 and sum(e.get('unit_amount', 0) for e in date_specific_entries) > 0
+                    
+                # Also check by name
+                if not specific_date_has_timesheet and resource_name != "Unknown":
+                    name_key = (resource_name, task_id, project_id)
+                    if name_key in designer_name_to_timesheet:
+                        # Filter entries by this specific date
+                        for entry in designer_name_to_timesheet[name_key]['entries']:
+                            entry_date = entry.get('date', '')
+                            if entry_date == formatted_task_date:
+                                date_specific_entries.append(entry)
+                                
+                        specific_date_has_timesheet = len(date_specific_entries) > 0 and sum(e.get('unit_amount', 0) for e in date_specific_entries) > 0
             # Ensure we have a valid URL format if it's not empty
             if sub_task_link and isinstance(sub_task_link, str):
                 # Add the protocol if missing but looks like a URL
