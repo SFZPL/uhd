@@ -65,7 +65,8 @@ from helpers import (
     get_project_id_by_name,
     update_task_designer,
     get_odoo_connection,
-    check_odoo_connection
+    check_odoo_connection,
+    get_available_fields
 )
 from gmail_integration import get_gmail_service, fetch_recent_emails
 from azure_llm import analyze_email
@@ -2733,6 +2734,17 @@ def designer_selection_page():
             if selected_designer_key in st.session_state:
                 designer_name = st.session_state[selected_designer_key]
                 
+                # Add debug logging to verify the correct designer name is being passed
+                st.write(f"Debug: Selected designer: {designer_name}")
+                
+                # Find employee ID with more robust matching
+                employee_id = None
+                for emp in employees:
+                    if designer_name.lower() in emp['name'].lower():
+                        employee_id = emp['id']
+                        st.write(f"Debug: Found employee ID: {employee_id} for {emp['name']}")
+                        break
+
                 # Try to find the available slot for this designer
                 designer_key = f"designer_options_{task['id']}"
                 if designer_key in st.session_state:
@@ -2790,6 +2802,11 @@ def designer_selection_page():
                                 if isinstance(task_end, pd.Timestamp):
                                     task_end = task_end.to_pydatetime()
                                 
+
+                                # Add before creating the planning slot
+                                planning_fields = get_available_fields(models, uid, 'planning.slot')
+                                st.write("Available planning.slot fields:", list(planning_fields.keys()))
+
                                 # Create the planning slot with full context
                                 slot_id = create_task(
                                     models, uid, employee_id, 
