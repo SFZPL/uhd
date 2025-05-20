@@ -1,2665 +1,3014 @@
-# Add these imports if not already imported
+import os
+import sys
+
+# ─── Make sure local modules and the data folder are importable ─────────────────
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
+# Now try to import
+try:
+    from config import get_secret
+except ImportError as e:
+    print(f"Error importing config: {e}")
+    # Fallback implementation
+    def get_secret(key, default=None):
+        """Fallback get_secret implementation"""
+        if hasattr(st, 'secrets') and key in st.secrets:
+            return st.secrets[key]
+        return os.environ.get(key, default)
+    
+# ─── Standard library ─────────────────────────────────────────────────────────
+import logging
+import traceback
+import re
+import uuid
+from pathlib import Path
+from datetime import datetime, date, time
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+# ─── Third‑party ──────────────────────────────────────────────────────────────
 import streamlit as st
 import pandas as pd
-import requests  # For making webhook HTTP requests
-import xmlrpc.client
-from datetime import datetime, timedelta, date
-import logging
-from io import BytesIO, StringIO
-import traceback
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.application import MIMEApplication
-import os
-import json
-import msal  # You'll need to pip install msal
-import time
-from teams_direct_messaging import TeamsMessenger
 
+# ─── Local modules ───────────────────────────────────────────────────────────
+from config import get_secret
 
-# Configure logging
+# Debug util (graceful fallback if missing)
+try:
+    from debug_utils import inject_debug_page, debug_function, SystemDebugger
+except ImportError:
+    def inject_debug_page(): return False
+    def debug_function(f): return f
+    class SystemDebugger:
+        def streamlit_debug_page(self): pass
+
+# Core helpers (all secrets now loaded inside these functions)
+from helpers import (
+    authenticate_odoo,
+    create_odoo_task,
+    get_sales_orders,
+    get_sales_order_details,
+    get_employee_schedule,
+    create_task,
+    find_employee_id,
+    get_target_languages_odoo,
+    get_guidelines_odoo,
+    get_client_success_executives_odoo,
+    get_service_category_1_options,
+    get_service_category_2_options,
+    get_all_employees_in_planning,
+    find_earliest_available_slot,
+    get_companies,
+    get_retainer_projects,
+    get_retainer_customers,
+    get_project_id_by_name,
+    update_task_designer,
+    get_odoo_connection,
+    check_odoo_connection
+)
+from gmail_integration import get_gmail_service, fetch_recent_emails
+from azure_llm import analyze_email
+from designer_selector import (
+    load_designers,
+    suggest_best_designer,
+    suggest_best_designer_available,
+    filter_designers_by_availability,
+    rank_designers_by_skill_match
+)
+
+from prezlab_ui import inject_custom_css, header, container, message, progress_steps, scribble, add_logo
+
+# ─── Logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    filename='planning_timesheet_reporter.log',
-    force=True  # Add this line to reset any existing logging configuration
+    format="%(asctime)s %(name)s [%(levelname)s] %(message)s",
+    filename="app.log"
 )
 logger = logging.getLogger(__name__)
 
-# Initialize session state
-if 'odoo_uid' not in st.session_state:
-    st.session_state.odoo_uid = None
-if 'odoo_models' not in st.session_state:
-    st.session_state.odoo_models = None
-# Load secrets for Odoo connection
-odoo_url = st.secrets.get("ODOO_URL", "")
-odoo_db = st.secrets.get("ODOO_DB", "")
-odoo_username = st.secrets.get("ODOO_USERNAME", "")
-odoo_password = st.secrets.get("ODOO_PASSWORD", "")
 
-if 'odoo_db' not in st.session_state:
-    st.session_state.odoo_db = odoo_db
-if 'odoo_url' not in st.session_state:
-    st.session_state.odoo_url = odoo_url
-if 'odoo_username' not in st.session_state:
-    st.session_state.odoo_username = odoo_username
-if 'odoo_password' not in st.session_state:
-    st.session_state.odoo_password = odoo_password
-if 'debug_mode' not in st.session_state:
-    st.session_state.debug_mode = False
-if 'confirmed_only' not in st.session_state:
-    st.session_state.confirmed_only = True  # Default to showing only confirmed tasks
-if 'shift_status_filter' not in st.session_state:
-    st.session_state.shift_status_filter = "Planned"  # Default to Planned (confirmed)
-if 'model_fields_cache' not in st.session_state:
-    st.session_state.model_fields_cache = {}
-if 'last_error' not in st.session_state:
-    st.session_state.last_error = None
-# Email settings
-if 'email_enabled' not in st.session_state:
-    st.session_state.email_enabled = True
-if 'email_recipient' not in st.session_state:
-    st.session_state.email_recipient = odoo_username  # Default to the Odoo username (usually an email)
-if 'designer_emails_enabled' not in st.session_state:
-    st.session_state.designer_emails_enabled = True
-if 'designer_email_mapping' not in st.session_state:
-    st.session_state.designer_email_mapping = {}
-if 'smtp_server' not in st.session_state:
-    st.session_state.smtp_server = "smtp.gmail.com"
-# Add after the email settings initialization (around line 50-70)
-if 'manager_emails_enabled' not in st.session_state:
-    st.session_state.manager_emails_enabled = True
-# Email settings
-if 'smtp_port' not in st.session_state:
-    st.session_state.smtp_port = 587
-if 'smtp_username' not in st.session_state:
-    st.session_state.smtp_username = ""
-if 'smtp_password' not in st.session_state:
-    st.session_state.smtp_password = ""
-
-# Teams webhook settings
-if 'webhooks_enabled' not in st.session_state:
-    st.session_state.webhooks_enabled = False
-if 'designer_webhook_mapping' not in st.session_state:
-    st.session_state.designer_webhook_mapping = {}
-if 'test_webhook_url' not in st.session_state:
-    st.session_state.test_webhook_url = ""
-# Teams direct messaging settings
-if 'teams_direct_msg_enabled' not in st.session_state:
-    st.session_state.teams_direct_msg_enabled = True
-if 'azure_client_id' not in st.session_state:
-    st.session_state.azure_client_id = ""
-if 'azure_client_secret' not in st.session_state:
-    st.session_state.azure_client_secret = ""
-if 'azure_tenant_id' not in st.session_state:
-    st.session_state.azure_tenant_id = ""
-if 'designer_teams_id_mapping' not in st.session_state:
-    st.session_state.designer_teams_id_mapping = {}
-
-
-# Load Azure AD credentials from secrets if they exist
-if hasattr(st.secrets, "AZURE_AD"):
-    if "CLIENT_ID" in st.secrets.AZURE_AD:
-        st.session_state.azure_client_id = st.secrets.AZURE_AD.CLIENT_ID
-    if "CLIENT_SECRET" in st.secrets.AZURE_AD:
-        st.session_state.azure_client_secret = st.secrets.AZURE_AD.CLIENT_SECRET
-    if "TENANT_ID" in st.secrets.AZURE_AD:
-        st.session_state.azure_tenant_id = st.secrets.AZURE_AD.TENANT_ID
-
-# Load Teams user ID mappings from secrets if they exist
-if hasattr(st.secrets, "TEAMS_USER_IDS"):
-    for designer, teams_id in st.secrets.TEAMS_USER_IDS.items():
-        st.session_state.designer_teams_id_mapping[designer] = teams_id
-# Load webhook mappings from secrets if they exist
-if hasattr(st.secrets, "WEBHOOKS"):
-    for designer, webhook_url in st.secrets.WEBHOOKS.items():
-        st.session_state.designer_webhook_mapping[designer] = webhook_url
-
-# Load designer email mappings from secrets if they exist
-if hasattr(st.secrets, "DESIGNER_EMAILS"):
-    for designer, email in st.secrets.DESIGNER_EMAILS.items():
-        st.session_state.designer_email_mapping[designer] = email
-
-# Add reference date for cutoff of historical tasks
-if 'reference_date' not in st.session_state:
-    st.session_state.reference_date = date.today() - timedelta(days=7)  # Default to 7 days ago
-
-# Add additional initialization for email settings from secrets if they exist
-if hasattr(st.secrets, "EMAIL"):
-    if "SMTP_SERVER" in st.secrets.EMAIL and st.session_state.smtp_server == "smtp.gmail.com":
-        st.session_state.smtp_server = st.secrets.EMAIL.SMTP_SERVER
-    if "SMTP_PORT" in st.secrets.EMAIL and st.session_state.smtp_port == 587:
-        st.session_state.smtp_port = st.secrets.EMAIL.SMTP_PORT
-    if "SMTP_USERNAME" in st.secrets.EMAIL and not st.session_state.smtp_username:
-        st.session_state.smtp_username = st.secrets.EMAIL.SMTP_USERNAME
-    if "SMTP_PASSWORD" in st.secrets.EMAIL and not st.session_state.smtp_password:
-        st.session_state.smtp_password = st.secrets.EMAIL.SMTP_PASSWORD
-
-if 'current_page' not in st.session_state:
-    st.session_state.current_page = "Missing Timesheet Reporter"
-
-# Initialize data container
-if 'employee_data' not in st.session_state:
-    st.session_state.employee_data = None
-
-# Load employee data at startup
-def load_employee_data():
-    try:
-        csv_path = "uhd_data.csv"
-        if os.path.exists(csv_path):
-            logger.info(f"Loading employee data from CSV: {csv_path}")
-            df = pd.read_csv(csv_path)
-            
-            # Verify required columns exist
-            required_columns = ["Employee Name", "Manager", "Work Email", "Microsoft ID"]
-            missing_columns = [col for col in required_columns if col not in df.columns]
-            if missing_columns:
-                logger.error(f"Required columns missing from CSV: {missing_columns}")
-                return None
-            
-            logger.info(f"Successfully loaded employee data with {len(df)} rows")
-            return df
-        else:
-            logger.error(f"Employee data file not found: {csv_path}")
-            return None
-    except Exception as e:
-        error_details = traceback.format_exc()
-        logger.error(f"Error loading employee data: {e}\n{error_details}")
-        return None
-    
-def update_designer_mappings_from_csv():
-    """Update designer email and Teams ID mappings from CSV data"""
-    if st.session_state.employee_data is None:
-        logger.warning("Cannot update designer mappings: employee data not available")
-        return
-        
-    df = st.session_state.employee_data
-    
-    # Clear existing mappings to prioritize CSV data
-    st.session_state.designer_email_mapping = {}
-    st.session_state.designer_teams_id_mapping = {}
-    
-    # Update designer email mappings
-    for _, row in df.iterrows():
-        if pd.notna(row["Employee Name"]) and pd.notna(row["Work Email"]):
-            st.session_state.designer_email_mapping[row["Employee Name"]] = row["Work Email"]
-    
-    # Update Microsoft Teams ID mappings
-    for _, row in df.iterrows():
-        if pd.notna(row["Employee Name"]) and pd.notna(row["Microsoft ID"]):
-            st.session_state.designer_teams_id_mapping[row["Employee Name"]] = row["Microsoft ID"]
-                
-    logger.info(f"Updated designer mappings from CSV data: {len(st.session_state.designer_email_mapping)} emails, {len(st.session_state.designer_teams_id_mapping)} Teams IDs")
-# Load employee data at startup
-st.session_state.employee_data = load_employee_data()
-if st.session_state.employee_data is None:
-    logger.warning("Failed to load employee data at startup. Some features may not work correctly.")
-
-# Call update_designer_mappings_from_csv() after loading employee data
-if st.session_state.employee_data is not None:
-    update_designer_mappings_from_csv()
-
-
-def send_designer_notification(designer_name, designer_teams_id, tasks):
-    """Send a notification to a designer"""
-    
-    # Create messenger
-    messenger = TeamsMessenger(
-        st.session_state.azure_client_id,
-        st.session_state.azure_client_secret,
-        st.session_state.azure_tenant_id
-    )
-    
-    # Format a compact message for topic
-    max_days_overdue = max(t.get("Days Overdue", 0) for t in tasks)
-    urgency_emoji = "🔴" if max_days_overdue >= 2 else "🟠"
-    
-    # Create a concise but informative topic
-    task_summary = f"{len(tasks)} task{'s' if len(tasks) > 1 else ''}"
-    oldest_date = min([t.get("Date", "") for t in tasks if t.get("Date")])
-    
-    # Format the notification topic
-    message = f"{urgency_emoji} TIMESHEET ALERT - {task_summary} missing hours (oldest: {oldest_date}) - Action required"
-    
-    # Send notification
-    return messenger.notify_user(designer_teams_id, message)
-
-def render_teams_direct_messaging_ui():
-    """Render the UI for Teams direct messaging configuration"""
-    with st.sidebar.expander("Teams Direct Messaging", expanded=False):
-        st.session_state.teams_direct_msg_enabled = st.checkbox(
-            "Enable Teams Direct Messages", 
-            value=st.session_state.teams_direct_msg_enabled,
-            help="Send personal chat messages to designers in Microsoft Teams"
-        )
-        
-        # Azure AD App registration details
-        st.markdown("### Azure AD App Configuration")
-        st.info("You need to register an app in Azure AD with Microsoft Graph API permissions: Chat.Create, Chat.Read.All, Chat.ReadWrite.All, Teamwork.Migrate.All.")
-        
-        st.session_state.azure_client_id = st.text_input(
-            "Azure AD Client ID",
-            value=st.session_state.azure_client_id,
-            type="password", 
-            help="Client ID from your Azure AD app registration"
-        )
-        
-        st.session_state.azure_client_secret = st.text_input(
-            "Azure AD Client Secret",
-            value=st.session_state.azure_client_secret,
-            type="password",
-            help="Client secret from your Azure AD app registration"
-        )
-        
-        st.session_state.azure_tenant_id = st.text_input(
-            "Azure AD Tenant ID",
-            value=st.session_state.azure_tenant_id,
-            type="password",
-            help="Tenant ID of your Azure AD"
-        )
-        
-        # Authentication test
-        if st.button("Test Authentication"):
-            if not (st.session_state.azure_client_id and st.session_state.azure_client_secret and st.session_state.azure_tenant_id):
-                st.error("Please configure Azure AD credentials first")
-            else:
-                try:
-                    # Create Teams messenger
-                    messenger = TeamsMessenger(
-                        st.session_state.azure_client_id,
-                        st.session_state.azure_client_secret,
-                        st.session_state.azure_tenant_id
-                    )
-                    
-                    # Test authentication
-                    with st.spinner("Testing authentication..."):
-                        auth_result = messenger.authenticate()
-                        if auth_result:
-                            st.success("✅ Authentication successful!")
-                        else:
-                            st.error("❌ Authentication failed!")
-                except Exception as e:
-                    st.error(f"Error testing authentication: {str(e)}")
-        
-        # Designer to Teams ID mapping
-        st.markdown("### Designer Teams User ID Mapping")
-        
-        # Manual mapping
-        st.markdown("#### Manual Mapping")
-        col1, col2 = st.columns(2)
-        with col1:
-            new_designer = st.text_input("Designer Name", key="new_teams_designer")
-        with col2:
-            new_teams_id = st.text_input("Teams User ID", key="new_teams_user_id")
-        
-        if st.button("Add Mapping"):
-            if new_designer and new_teams_id:
-                st.session_state.designer_teams_id_mapping[new_designer] = new_teams_id
-                st.success(f"Added Teams ID mapping for {new_designer}")
-            else:
-                st.error("Please enter both designer name and Teams user ID")
-        
-        # Display current mappings and allow removal
-        if st.session_state.designer_teams_id_mapping:
-            st.markdown("### Current Mappings")
-            for idx, (designer, teams_id) in enumerate(st.session_state.designer_teams_id_mapping.items()):
-                col1, col2, col3 = st.columns([3, 3, 1])
-                with col1:
-                    st.text(designer)
-                with col2:
-                    # Show just part of the ID for security
-                    masked_id = teams_id[:5] + "..." + teams_id[-5:] if len(teams_id) > 10 else teams_id
-                    st.text(masked_id)
-                with col3:
-                    if st.button("Remove", key=f"remove_teams_{idx}"):
-                        del st.session_state.designer_teams_id_mapping[designer]
-                        st.rerun()
-        
-        # Test message section
-        st.markdown("### Test Message")
-        test_designer = st.selectbox(
-            "Select Designer to Test", 
-            options=list(st.session_state.designer_teams_id_mapping.keys()) if st.session_state.designer_teams_id_mapping else ["No designers mapped"],
-            key="teams_direct_msg_test_designer"
-        )
-        
-        if st.button("Send Test Message"):
-            if not st.session_state.designer_teams_id_mapping:
-                st.error("Please add at least one designer Teams ID mapping")
-            elif not (st.session_state.azure_client_id and st.session_state.azure_client_secret and st.session_state.azure_tenant_id):
-                st.error("Please configure Azure AD credentials first")
-            elif test_designer == "No designers mapped":
-                st.error("Please add at least one designer mapping first")
-            else:
-                # Get test designer Teams ID
-                teams_id = st.session_state.designer_teams_id_mapping.get(test_designer)
-                
-                # Create test task
-                test_task = [{
-                    "Project": "Test Project",
-                    "Task": "Test Task",
-                    "Start Time": "09:00",
-                    "End Time": "17:00",
-                    "Allocated Hours": 8.0,
-                    "Date": time.strftime("%Y-%m-%d"),
-                    "Days Overdue": 1,
-                    "Client Success Member": "Test Manager"
-                }]
-                
-                with st.spinner("Sending test message..."):
-                    # Send test notification
-                    message_sent = send_designer_notification(
-                        test_designer,
-                        teams_id,
-                        test_task
-                    )
-                    
-                    if message_sent:
-                        st.success(f"Message sent to {test_designer}! Check your Teams app.")
-                    else:
-                        st.error(f"Failed to send message to {test_designer}")
-def send_designer_teams_direct_messages(designers, selected_date):
-    """Send Teams direct messages to designers with missing timesheets"""
-    if not st.session_state.teams_direct_msg_enabled:
-        return False, 0, 0
-        
-    if not (st.session_state.azure_client_id and st.session_state.azure_client_secret and st.session_state.azure_tenant_id):
-        return False, 0, 0
-    
-    success_count = 0
-    fail_count = 0
-    
-    # Send direct message to each designer with missing timesheets
-    for designer, tasks in designers.items():
-        # Check if we have a Teams ID for this designer
-        if designer in st.session_state.designer_teams_id_mapping:
-            designer_teams_id = st.session_state.designer_teams_id_mapping[designer]
-            
-            # Send the notification
-            message_sent = send_designer_notification(
-                designer,
-                designer_teams_id,
-                tasks
-            )
-            
-            if message_sent:
-                success_count += 1
-            else:
-                fail_count += 1
-        else:
-            fail_count += 1
-    
-    return True, success_count, fail_count
-
-def authenticate_odoo(url, db, username, password):
-    """Authenticate with Odoo and return uid and models"""
-    try:
-        common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common")
-        uid = common.authenticate(db, username, password, {})
-        
-        if not uid:
-            st.error("Odoo authentication failed - invalid credentials")
-            logger.error("Odoo authentication failed - invalid credentials")
-            return None, None
-            
-        models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object")
-        logger.info(f"Successfully connected to Odoo (UID: {uid})")
-        return uid, models
-    except Exception as e:
-        error_details = traceback.format_exc()
-        logger.error(f"Odoo connection error: {e}\n{error_details}")
-        st.error(f"Odoo connection error: {e}")
-        st.session_state.last_error = error_details
-        return None, None
-
-def get_model_fields(models, uid, odoo_db, odoo_password, model_name):
-    """Get fields for a specific model, with caching"""
-    # Check if we have cached fields for this model
-    if model_name in st.session_state.model_fields_cache:
-        return st.session_state.model_fields_cache[model_name]
-    
-    try:
-        fields = models.execute_kw(
-            odoo_db, uid, odoo_password,
-            model_name, 'fields_get',
-            [],
-            {'attributes': ['string', 'type', 'relation']}
-        )
-        # Cache the result
-        st.session_state.model_fields_cache[model_name] = fields
-        return fields
-    except Exception as e:
-        error_details = traceback.format_exc()
-        logger.error(f"Error getting fields for model {model_name}: {e}\n{error_details}")
-        st.session_state.last_error = error_details
-        return {}
-
-def get_planning_slots(models, uid, odoo_db, odoo_password, start_date, end_date=None, shift_status_filter=None):
+def add_debug_sidebar(debugger: SystemDebugger):
     """
-    Get planning slots for a date range, with a focus on finding all slots 
-    that overlap with the given date range. Optionally filter by x_studio_shift_status.
+    Add a debug sidebar option to the existing sidebar
     """
-    try:
-        # Get the fields for planning.slot model
-        fields_info = get_model_fields(models, uid, odoo_db, odoo_password, 'planning.slot')
-        available_fields = list(fields_info.keys())
-        
-        # Handle single date or date range
-        if end_date is None:
-            end_date = start_date
-        
-        # Prepare the date strings
-        start_date_str = start_date.strftime("%Y-%m-%d")
-        end_date_str = end_date.strftime("%Y-%m-%d")
-        next_date_str = (end_date + timedelta(days=1)).strftime("%Y-%m-%d")
-        
-        # Create different domain variations to catch various date formats and conditions
-        # This is needed because Odoo instances can have different field naming or formats
-        base_domains = [
-            # Standard format with start/end datetime - get all slots in the date range
-            [
-                '|',
-                # Slots that start in our date range
-                '&', ('start_datetime', '>=', f"{start_date_str} 00:00:00"), ('start_datetime', '<', f"{next_date_str} 00:00:00"),
-                # Slots that end in our date range or overlap with it
-                '|',
-                '&', ('end_datetime', '>=', f"{start_date_str} 00:00:00"), ('end_datetime', '<', f"{next_date_str} 00:00:00"),
-                '&', ('start_datetime', '<', f"{start_date_str} 00:00:00"), ('end_datetime', '>=', f"{next_date_str} 00:00:00")
-            ],
-            # Alternative based on date fields if they exist
-            [],
-            # Simple date string matching (fallback)
-            [('start_datetime', '>=', start_date_str), ('start_datetime', '<', next_date_str)]
-        ]
-        
-        # Add shift_status filter if provided
-        domains = []
-        if shift_status_filter and 'x_studio_shift_status' in available_fields:
-            logger.info(f"Filtering planning slots by x_studio_shift_status: {shift_status_filter}")
-            for base_domain in base_domains:
-                if base_domain:  # Skip empty domain
-                    domain_with_filter = base_domain.copy()
-                    domain_with_filter.append(('x_studio_shift_status', '=', shift_status_filter))
-                    domains.append(domain_with_filter)
-        else:
-            domains = base_domains
-        
-        # Basic fields we want, checking which ones exist
-        desired_fields = [
-            'id', 'name', 'resource_id', 'start_datetime', 'end_datetime', 
-            'allocated_hours', 'state', 'project_id', 'task_id', 'x_studio_shift_status',
-            'create_uid', 'x_studio_sub_task_1', 'x_studio_task_activity', 'x_studio_service_category_1', 'x_studio_sub_task_link' 
-        ]
-        
-        # Only request fields that exist
-        fields_to_request = [f for f in desired_fields if f in available_fields]
-        
-        # Log the fields we're requesting
-        logger.info(f"Requesting planning slot fields: {fields_to_request}")
-        
-        # Try each domain until we get results
-        all_slots = []
-        success = False
-        
-        for i, domain in enumerate(domains):
-            if not domain:  # Skip empty domain
-                continue
-                
-            try:
-                logger.info(f"Trying planning slot domain {i+1}: {domain}")
-                slots = models.execute_kw(
-                    odoo_db, uid, odoo_password,
-                    'planning.slot', 'search_read',
-                    [domain],
-                    {'fields': fields_to_request}
-                )
-                
-                if slots:
-                    logger.info(f"Found {len(slots)} planning slots with domain {i+1}")
-                    all_slots.extend(slots)
-                    success = True
-                    # Don't break, try all domains to get comprehensive results
-            except Exception as e:
-                # Just log and continue to next domain
-                logger.warning(f"Error with planning slot domain {i+1}: {e}")
-        
-        # If we didn't get any results, try a more permissive approach
-        if not success:
-            try:
-                logger.info("Trying to get all recent planning slots")
-                # Get all slots from recent dates
-                one_month_ago = (start_date - timedelta(days=30)).strftime("%Y-%m-%d")
-                base_domain = [('start_datetime', '>=', one_month_ago)]
-                        
-                # Add shift_status filter if provided
-                if shift_status_filter and 'x_studio_shift_status' in available_fields:
-                    base_domain.append(('x_studio_shift_status', '=', shift_status_filter))
-                
-                recent_slots = models.execute_kw(
-                    odoo_db, uid, odoo_password,
-                    'planning.slot', 'search_read',
-                    [base_domain],
-                    {'fields': fields_to_request}
-                )
-                
-                # Filter by date string to find matching ones
-                end_date_str_simple = end_date_str.replace('-', '')  # Also try without dashes
-                
-                for slot in recent_slots:
-                    start = slot.get('start_datetime', '')
-                    if end_date_str in start or end_date_str_simple in start.replace('-', ''):
-                        all_slots.append(slot)
-                
-                logger.info(f"Filtered to {len(all_slots)} planning slots for the date range")
-                
-            except Exception as e:
-                error_details = traceback.format_exc()
-                logger.error(f"Error with permissive planning slot query: {e}\n{error_details}")
-        
-        # Deduplicate slots by ID
-        unique_slots = []
-        seen_ids = set()
-        for slot in all_slots:
-            if slot['id'] not in seen_ids:
-                unique_slots.append(slot)
-                seen_ids.add(slot['id'])
-        
-        logger.info(f"Returning {len(unique_slots)} unique planning slots for date range {start_date_str} to {end_date_str}")
-        return unique_slots
-        
-    except Exception as e:
-        error_details = traceback.format_exc()
-        logger.error(f"Error fetching planning slots: {e}\n{error_details}")
-        st.error(f"Error fetching planning slots: {e}")
-        st.session_state.last_error = error_details
-        return []
+    if st.session_state.user['username'] == 'admin':
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("🐞 Debugging")
+        if st.sidebar.button("System Debug Dashboard"):
+            # Switch to debug mode
+            st.session_state.debug_mode = "system_debug"
 
-def get_timesheet_entries(models, uid, odoo_db, odoo_password, start_date, end_date=None):
-    """Get timesheet entries for a date range"""
-    try:
-        if end_date is None:
-            end_date = start_date
-            
-        # Add one day to end_date to include the entire end date
-        query_end_date = end_date + timedelta(days=1)
-            
-        start_date_str = start_date.strftime("%Y-%m-%d")
-        end_date_str = query_end_date.strftime("%Y-%m-%d")
-        
-        # Domain for date range
-        domain = [
-            ('date', '>=', start_date_str),
-            ('date', '<', end_date_str)
-        ]
-        
-        # Get fields for the model to make sure we only request valid fields
-        fields_info = get_model_fields(models, uid, odoo_db, odoo_password, 'account.analytic.line')
-        available_fields = list(fields_info.keys())
-        
-        # Fields we want (if they exist)
-        desired_fields = [
-            'id', 'name', 'date', 'unit_amount', 'employee_id', 
-            'task_id', 'project_id', 'user_id', 'company_id'
-        ]
-        
-        # Only request fields that exist
-        fields_to_request = [f for f in desired_fields if f in available_fields]
-        
-        # Execute query
-        logger.info(f"Querying timesheets with domain: {domain}")
-        entries = models.execute_kw(
-            odoo_db, uid, odoo_password,
-            'account.analytic.line', 'search_read',
-            [domain],
-            {'fields': fields_to_request}
-        )
-        
-        logger.info(f"Found {len(entries)} timesheet entries")
-        return entries
-    except Exception as e:
-        error_details = traceback.format_exc()
-        logger.error(f"Error fetching timesheet entries: {e}\n{error_details}")
-        st.error(f"Error fetching timesheet entries: {e}")
-        st.session_state.last_error = error_details
-        return []
-
-def get_references_data(models, uid, odoo_db, odoo_password):
-    """Get reference data (projects, users, employees, etc.) for display"""
-    reference_data = {}
-    
-    try:
-        # Get resources (employees/equipment in planning)
-        resources = models.execute_kw(
-            odoo_db, uid, odoo_password,
-            'resource.resource', 'search_read',
-            [[]],
-            {'fields': ['id', 'name', 'user_id', 'resource_type', 'company_id']}
-        )
-        reference_data['resources'] = {r['id']: r for r in resources}
-        
-        # Get projects
-        projects = models.execute_kw(
-            odoo_db, uid, odoo_password,
-            'project.project', 'search_read',
-            [[]],
-            {'fields': ['id', 'name']}
-        )
-        reference_data['projects'] = {p['id']: p for p in projects}
-        
-        # Get users
-        users = models.execute_kw(
-            odoo_db, uid, odoo_password,
-            'res.users', 'search_read',
-            [[]],
-            {'fields': ['id', 'name']}
-        )
-        reference_data['users'] = {u['id']: u for u in users}
-        
-        # Get tasks
-        tasks = models.execute_kw(
-            odoo_db, uid, odoo_password,
-            'project.task', 'search_read',
-            [[]],
-            {'fields': ['id', 'name']}
-        )
-        reference_data['tasks'] = {t['id']: t for t in tasks}
-        
-        return reference_data
-    except Exception as e:
-        error_details = traceback.format_exc()
-        logger.error(f"Error fetching reference data: {e}\n{error_details}")
-        st.warning(f"Error fetching some reference data: {e}")
-        st.session_state.last_error = error_details
-        return reference_data
-
-def send_email_report(df, selected_date, missing_count, timesheet_count, shift_status_filter=None, reference_date=None):
-    """Send email with report attached as CSV and summary in the body"""
-    try:
-        if not st.session_state.email_enabled:
-            logger.info("Email sending is disabled, skipping")
-            return False
-            
-        if not st.session_state.smtp_username or not st.session_state.smtp_password:
-            logger.error("Email credentials not configured")
-            return False
-            
-        # Create email
-        msg = MIMEMultipart()
-        msg['From'] = st.session_state.smtp_username
-        msg['To'] = st.session_state.email_recipient
-        
-        # Create date strings for display
-        if reference_date:
-            msg['Subject'] = f"Missing Timesheet Report - {reference_date.strftime('%Y-%m-%d')} to {selected_date.strftime('%Y-%m-%d')}"
-            date_range_str = f"{reference_date.strftime('%Y-%m-%d')} to {selected_date.strftime('%Y-%m-%d')}"
-        else:
-            msg['Subject'] = f"Missing Timesheet Report - {selected_date.strftime('%Y-%m-%d')}"
-            date_range_str = selected_date.strftime('%Y-%m-%d')
-        
-        # Prepare filter info for email body
-        filter_text = ""
-        if shift_status_filter:
-            filter_text = f" with shift status '{shift_status_filter}'"
-            
-        # Create email body text
-        body = f"""
-        <html>
-        <body>
-        <h2>Missing Timesheet Report - {date_range_str}</h2>
-        <p>This is an automated report from the Missing Timesheet Reporter tool.</p>
-        
-        <h3>Summary:</h3>
-        <ul>
-            <li>Date Range: {date_range_str}</li>
-            <li>Found {timesheet_count} timesheet entries</li>
-            <li>Found {missing_count} planning slots{filter_text} without timesheet entries</li>
-        </ul>
-        """
-        
-        # Add empty data message or summary of missing entries
-        if df.empty:
-            body += f"<p>No planning slots found for this date range{filter_text}.</p>"
-        elif missing_count == 0:
-            body += f"<p>All planning slots{filter_text} have corresponding timesheet entries!</p>"
-        else:
-            # Add summary table of designers with missing entries
-            designer_summary = df.groupby("Designer").size().reset_index(name="Missing Entries")
-            designer_summary = designer_summary.sort_values("Missing Entries", ascending=False)
-            
-            body += "<h3>Missing Entries by Designer:</h3><table border='1'><tr><th>Designer</th><th>Missing Entries</th></tr>"
-            for _, row in designer_summary.iterrows():
-                body += f"<tr><td>{row['Designer']}</td><td>{row['Missing Entries']}</td></tr>"
-            body += "</table>"
-            
-            # Add summary table of projects with missing entries
-            project_summary = df.groupby("Project").size().reset_index(name="Missing Entries")
-            project_summary = project_summary.sort_values("Missing Entries", ascending=False)
-            
-            body += "<h3>Missing Entries by Project:</h3><table border='1'><tr><th>Project</th><th>Missing Entries</th></tr>"
-            for _, row in project_summary.iterrows():
-                body += f"<tr><td>{row['Project']}</td><td>{row['Missing Entries']}</td></tr>"
-            body += "</table>"
-            
-        body += """
-        <p>Please check the attached CSV file for detailed information.</p>
-        <p>This is an automated message from the Missing Timesheet Reporter tool.</p>
-        </body>
-        </html>
-        """
-        
-        # Attach email body
-        msg.attach(MIMEText(body, 'html'))
-        
-        # Create CSV attachment if data exists
-        if not df.empty and missing_count > 0:
-            csv_data = df.to_csv(index=False)
-            attachment = MIMEApplication(csv_data.encode('utf-8'))
-            date_id = selected_date.strftime("%Y-%m-%d")
-            attachment['Content-Disposition'] = f'attachment; filename="missing_timesheet_report_{date_id}.csv"'
-            msg.attach(attachment)
-            
-        # Send email
-        server = smtplib.SMTP(st.session_state.smtp_server, st.session_state.smtp_port)
-        server.starttls()
-        server.login(st.session_state.smtp_username, st.session_state.smtp_password)
-        server.send_message(msg)
-        server.quit()
-        
-        logger.info(f"Email report sent to {st.session_state.email_recipient}")
+def handle_debug_mode(debugger: SystemDebugger):
+    """
+    Handle the system debug mode rendering
+    """
+    if st.session_state.get("debug_mode") == "system_debug":
+        debugger.streamlit_debug_page()
+        # Add a button to return to normal mode
+        if st.button("Return to Normal Mode"):
+            st.session_state.pop("debug_mode")
+            st.rerun()
         return True
-    except Exception as e:
-        error_details = traceback.format_exc()
-        logger.error(f"Error sending email: {e}\n{error_details}")
-        st.session_state.last_error = error_details
-        return False
+    return False
 
-def send_designer_email(
-        designer_name: str,
-        designer_email: str,
-        report_date: date,
-        tasks: list,
-        smtp_settings: dict
-):
+def setup_debugging(main_app):
     """
-    Send a one-shot e-mail to a designer listing the tasks that still
-    have no hours logged.  Message style changes according to how long
-    the oldest task has been open.
+    Set up debugging for the main Streamlit application
     """
-    try:
-        # -- SMTP sanity check ------------------------------------------------
-        for key in ("server", "port", "username", "password"):
-            if key not in smtp_settings or not smtp_settings[key]:
-                logger.error("Missing SMTP setting: %s", key)
+    # Inject debug handlers and get debugger instance
+    debugger = inject_debug_page(main_app)
+    
+    # Modify the sidebar render function to add debug option
+    original_render_sidebar = main_app.render_sidebar
+    
+    def modified_render_sidebar():
+        original_render_sidebar()
+        add_debug_sidebar(debugger)
+    
+    main_app.render_sidebar = modified_render_sidebar
+    
+    return debugger
+
+# Replace environment variables with secrets
+ODOO_URL = get_secret("ODOO_URL")
+ODOO_DB = get_secret("ODOO_DB")
+ODOO_USERNAME = get_secret("ODOO_USERNAME") 
+ODOO_PASSWORD = get_secret("ODOO_PASSWORD")
+
+
+# Set page config
+st.set_page_config(
+    page_title="Task Management System",
+    page_icon="📋",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+def validate_session():
+    """
+    Validates the current session and handles expiry
+    
+    Returns:
+        True if session is valid, False if expired or not logged in
+    """
+    from session_manager import SessionManager
+    
+    # CRITICAL FIX: Skip validation if OAuth flow is in progress
+    if "code" in st.query_params:
+        return True
+    
+    # Update activity timestamp
+    SessionManager.update_activity()
+    
+    # Check if logged in
+    if not st.session_state.get("logged_in", False):
+        return False
+    
+    # Check for session expiry
+    if not SessionManager.check_session_expiry():
+        return False
+    
+    # Validate Odoo connection
+    if not check_odoo_connection():
+        with st.spinner("Reconnecting to Odoo..."):
+            uid, models = get_odoo_connection(force_refresh=True)
+            if not uid or not models:
+                st.error("Lost connection to Odoo. Please log in again.")
+                SessionManager.logout()
                 return False
-
-        # -- work out 'days overdue' -----------------------------------------
-        max_days_overdue = max(t.get("Days Overdue", 0) for t in tasks)
-
-        one_day  = (max_days_overdue == 1)
-        two_plus = (max_days_overdue >= 2)
-        
-        # -- Get the first name only -----------------------------------------
-        # Extract first name from the full name
-        first_name = designer_name.split()[0] if designer_name else "there"
-
-        if one_day:
-            subj = "Quick Nudge – Log Your Hours"
-        else:  # two_plus
-            subj = "Heads-Up: You've Missed Logging Hours for 2 Days"
-
-        # -- e-mail boilerplate ----------------------------------------------
-        msg            = MIMEMultipart()
-        msg["From"]    = smtp_settings["username"]
-        msg["To"]      = designer_email
-        msg["Subject"] = subj
-
-        # --------------------------------------------------------------------
-        # Build HTML body
-        # --------------------------------------------------------------------
-        def format_task(t):
-            task_name = t.get('Task', 'Unknown')
-            task_link = t.get('Sub_Task_Link', '')
-            
-            # Format the link as a separate column
-            link_display = "No link"
-            if task_link and isinstance(task_link, str):
-                if task_link.startswith('http') or task_link.startswith('/'):
-                    link_display = f'<a href="{task_link}" target="_blank">Open Task</a>'
-            
-            return f"""
-            <tr>
-                <td>{task_name}</td>
-                <td>{t.get('Project', 'Unknown')}</td>
-                <td>{t.get('Date', '—')}</td>
-                <td>{t.get('Client Success Member', 'Unknown')}</td>
-                <td>{link_display}</td>
-            </tr>"""
-
-        tasks_html = "".join(format_task(t) for t in tasks)
-
-        # Use first name instead of full name
-        greeting = (
-            f"<p>Hi {first_name},</p>"
-            if one_day
-            else f"<p>Hi {first_name},</p>"
-        )
-
-        intro = ("""
-            This is a gentle reminder to log your hours for the task and date below — 
-            it takes a minute, but the impact is big:
-        """ if one_day else """
-            It looks like no hours have been logged for the past two days
-            for the following task and date:
-        """)
-
-        outro = ("""
-            <p>Taking a minute now helps us stay on top of things later 🙌</p>
-            <p>Let us know if you need any support with this.</p>
-            <p><strong>Important:</strong> For multi-day tasks, please log your hours separately for <em>each day</em> you work on the task.</p>
-        """ if one_day else """
-            <p>We completely understand things can get busy — but consistent
-            time logging helps us improve project planning and smooth
-            reporting.</p>
-            <p>If something's holding you back from logging your hours,
-            just reach out. We're here to help.</p>
-            <p><strong>Important:</strong> For multi-day tasks, please log your hours separately for <em>each day</em> you work on the task.</p>
-        """)
-
-        body = f"""
-        <html><body>
-        {greeting}
-        <p>{intro}</p>
-
-        <table border="1" cellpadding="6" cellspacing="0">
-            <thead>
-                <tr>
-                    <th>Task</th>
-                    <th>Project</th>
-                    <th>Assigned on / Dates</th>
-                    <th>Client-Success Contact</th>
-                    <th>Link</th>
-                </tr>
-            </thead>
-            <tbody>
-                {tasks_html}
-            </tbody>
-        </table>
-
-        {outro}
-
-        <p style="font-size: 12px;">
-            — Automated notice from the Missing Timesheet Reporter
-        </p>
-        </body></html>
-        """
-
-        msg.attach(MIMEText(body, "html"))
-
-        # -- send it ----------------------------------------------------------
-        server = smtplib.SMTP(smtp_settings["server"], smtp_settings["port"])
-        server.starttls()
-        server.login(smtp_settings["username"], smtp_settings["password"])
-        server.send_message(msg)
-        server.quit()
-
-        logger.info("Designer e-mail sent to %s", designer_email)
-        return True
-
-    except Exception as exc:
-        logger.error("send_designer_email failed: %s", exc, exc_info=True)
-        return False
-
-# Add these functions after send_designer_email function (around line 487)
-def load_employee_manager_mapping():
-    """Load employee-manager relationships from preloaded employee data"""
-    try:
-        if st.session_state.employee_data is None:
-            # Try loading again if not already loaded
-            st.session_state.employee_data = load_employee_data()
-            
-        if st.session_state.employee_data is None:
-            logger.error("Cannot load employee-manager mapping: employee data not available")
-            return {}
-            
-        df = st.session_state.employee_data
-        
-        # Process each employee row
-        mapping = {}
-        for _, row in df.iterrows():
-            try:
-                employee_name = row["Employee Name"]
-                manager_name = row["Manager"]
-                work_email = row["Work Email"]
-                
-                if pd.notna(employee_name) and pd.notna(manager_name):
-                    # Find manager's email by looking up the manager in the dataframe
-                    manager_row = df[df["Employee Name"] == manager_name]
-                    if not manager_row.empty and pd.notna(manager_row.iloc[0]["Work Email"]):
-                        manager_email = manager_row.iloc[0]["Work Email"]
-                    else:
-                        logger.warning(f"Could not find email for manager '{manager_name}' of employee '{employee_name}'")
-                        continue
-                    
-                    # Store the mapping with the employee name as the key
-                    mapping[employee_name] = {
-                        "manager_name": manager_name,
-                        "manager_email": manager_email
-                    }
-            except Exception as e:
-                logger.warning(f"Error processing row for employee {row.get('Employee Name', 'Unknown')}: {e}")
-                continue
-        
-        logger.info(f"Loaded {len(mapping)} employee-manager relationships")
-        return mapping
-    except Exception as e:
-        error_details = traceback.format_exc()
-        logger.error(f"Error loading employee mapping: {e}\n{error_details}")
-        return {}
     
-def send_manager_email(manager_name, manager_email, designers_tasks, selected_date):
-    """Send email to a manager about their team's missing timesheets"""
-    try:
-        logger.info(f"Preparing email for manager: {manager_name} ({manager_email})")
-        
-        # Get the first name only
-        first_name = manager_name.split()[0] if manager_name else "there"
-        
-        # Determine if any tasks are more than 1 day overdue
-        max_days_overdue = 0
-        for designer_tasks in designers_tasks.values():
-            for task in designer_tasks:
-                days_overdue = task.get("Days Overdue", 0)
-                max_days_overdue = max(max_days_overdue, days_overdue)
-        
-        logger.info(f"Maximum days overdue for any task: {max_days_overdue}")
-        
-        # Set email subject and greeting based on days overdue
-        if max_days_overdue >= 2:
-            subject = f"Urgent: Team Members Haven't Logged Hours for 2 Days"
-            greeting = f"Hi {first_name},"
-            intro_text = "We've noticed that the following team members have <b>not logged their hours for 2 consecutive days</b> on assigned tasks. This is creating delays in tracking and reporting:"
-            closing = "This needs immediate follow-up. Please address this with your team and make sure all pending hours are logged without further delay.\n\nLet us know if any blockers are preventing this from happening."
-        else:
-            subject = f"Unlogged Hours Report – {selected_date.strftime('%Y-%m-%d')}"
-            greeting = f"Hi {first_name},"
-            intro_text = f"The following team members haven't logged their hours for tasks assigned on <b>{selected_date.strftime('%Y-%m-%d')}</b>:"
-            closing = "Reminders have already been sent to the individuals. Kindly follow up as needed to ensure all hours are logged promptly.\n\nLet us know if you need anything else."
-        
-        logger.info(f"Email subject: {subject}")
-        
-        # Create email
-        msg = MIMEMultipart('alternative')
-        msg['From'] = st.session_state.smtp_username
-        msg['To'] = manager_email
-        msg['Subject'] = subject
-        
-        # Log the SMTP details being used
-        logger.info(f"Using SMTP server: {st.session_state.smtp_server}:{st.session_state.smtp_port}")
-        logger.info(f"Using SMTP username: {st.session_state.smtp_username}")
-        
-        # Email content creation logic remains the same
-        html_body = f"""
-        <html>
-        <body>
-        <p>{greeting}</p>
-        <p>{intro_text}</p>
-        <ol>
-        """
-        
-        # Add each designer and their tasks in HTML
-        designer_counter = 1
-        for designer_name, tasks in designers_tasks.items():
-            # Sort tasks by days overdue (descending)
-            sorted_tasks = sorted(tasks, key=lambda x: x.get('Days Overdue', 0), reverse=True)
-            
-            html_body += f"<li><b>{designer_name}</b>\n<ul>\n"
-            
-            for task in sorted_tasks:
-                # Add task details
-                html_body += f"<li><b>Project</b>: {task.get('Project', 'Unknown')}</li>\n"
-                html_body += f"<li><b>Task</b>: {task.get('Task', 'Unknown')}</li>\n"
-                
-                if max_days_overdue >= 2:
-                    html_body += f"<li><b>Assignment Dates</b>: {task.get('Date', 'Unknown')}</li>\n"
+    return True
+
+# -------------------------------
+# SIDEBAR
+# -------------------------------
+def render_sidebar():
+    import xmlrpc.client
+    from config import get_secret
+    from session_manager import SessionManager
+
+    st.sidebar.title("Task Management")
+
+    # ─── Always‑visible debug info ──────────────────────────────────────────
+    st.sidebar.markdown("#### Debug Info:")
+    st.sidebar.write("Logged in:", st.session_state.get("logged_in", False))
+    st.sidebar.write("Username:", st.session_state.get("user", {}).get("username", "None"))
+    # Show session expiry if available
+    expiry = st.session_state.get("session_expiry")
+    if expiry:
+        st.sidebar.write("Session expires at:", expiry.strftime("%Y-%m-%d %H:%M:%S"))
+    st.sidebar.markdown("---")
+
+    # ─── Navigation & Auth (only if logged in) ───────────────────────────
+    if st.session_state.get("logged_in", False):
+        # Navigation
+        st.sidebar.subheader("Navigation")
+        if st.sidebar.button("Home"):
+            SessionManager.clear_flow_data()
+            st.rerun()
+
+        # Google Services
+        st.sidebar.subheader("Google Services")
+        gmail_ok = "google_gmail_creds" in st.session_state
+        drive_ok = "google_drive_creds" in st.session_state
+        status = "✅ Connected" if (gmail_ok and drive_ok) else "⚠️ Not connected"
+        if st.sidebar.button(f"Google Auth ({status})"):
+            st.session_state.show_google_auth = True
+            st.rerun()
+
+        # Odoo Connection
+        st.sidebar.subheader("Connection")
+        if st.sidebar.button("Reconnect to Odoo"):
+            with st.spinner("Reconnecting..."):
+                uid, models = get_odoo_connection(force_refresh=True)
+                if uid:
+                    st.sidebar.success("Reconnected successfully!")
                 else:
-                    html_body += f"<li><b>Time Assigned</b>: {task.get('Start Time', 'Unknown')}</li>\n"
-                
-                html_body += f"<li><b>Client Success Contact</b>: {task.get('Client Success Member', 'Unknown')}</li>\n"
-            
-            html_body += "</ul></li>\n"
-            designer_counter += 1
-        
-        # Add closing in HTML
-        html_body += f"""
-        </ol>
-        <p>{closing}</p>
-        <p>Thanks,<br>— Operations Team</p>
-        </body>
-        </html>
-        """
-        
-        # Create plain text version
-        text_body = f"{greeting}\n\n{intro_text}\n\n"
-        
-        # Add each designer and their tasks
-        designer_counter = 1
-        for designer_name, tasks in designers_tasks.items():
-            # Sort tasks by days overdue (descending)
-            sorted_tasks = sorted(tasks, key=lambda x: x.get('Days Overdue', 0), reverse=True)
-            
-            text_body += f"{designer_counter}. {designer_name}\n"
-            
-            for task in sorted_tasks:
-                # Add task details
-                text_body += f"  • Project: {task.get('Project', 'Unknown')}\n"
-                text_body += f"  • Task: {task.get('Task', 'Unknown')}\n"
-                
-                if max_days_overdue >= 2:
-                    text_body += f"  • Assignment Dates: {task.get('Date', 'Unknown')}\n"
-                else:
-                    text_body += f"  • Time Assigned: {task.get('Start Time', 'Unknown')}\n"
-                
-                text_body += f"  • Client Success Contact: {task.get('Client Success Member', 'Unknown')}\n"
-            
-            text_body += "\n"
-            designer_counter += 1
-        
-        # Add closing
-        text_body += f"{closing}\n\nThanks,\n— Operations Team"
-        
-        # Attach both versions
-        msg.attach(MIMEText(text_body, 'plain'))
-        msg.attach(MIMEText(html_body, 'html'))
-        
-        # Send email with detailed error handling
-        try:
-            logger.info(f"Connecting to SMTP server {st.session_state.smtp_server}:{st.session_state.smtp_port}")
-            server = smtplib.SMTP(st.session_state.smtp_server, st.session_state.smtp_port)
-            server.set_debuglevel(1)  # Enable SMTP debug output
-            
-            logger.info("Starting TLS")
-            server.starttls()
-            
-            logger.info(f"Logging in with username: {st.session_state.smtp_username}")
-            server.login(st.session_state.smtp_username, st.session_state.smtp_password)
-            
-            logger.info(f"Sending email to: {manager_email}")
-            server.send_message(msg)
-            
-            logger.info("Quitting SMTP connection")
-            server.quit()
-            
-            logger.info(f"Manager notification sent to {manager_name} ({manager_email})")
-            return True
-        except smtplib.SMTPAuthenticationError as e:
-            logger.error(f"SMTP Authentication failed: {e}")
-            return False
-        except smtplib.SMTPException as e:
-            logger.error(f"SMTP error: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"Unknown error sending email: {e}")
-            return False
-    except Exception as e:
-        error_details = traceback.format_exc()
-        logger.error(f"Error preparing manager email: {e}\n{error_details}")
-        return False
+                    st.sidebar.error("Failed to reconnect. Check logs.")
+        if st.sidebar.button("Logout"):
+            SessionManager.logout()
+            st.rerun()
 
-def send_manager_notifications(designers, selected_date, reference_date=None):
-    """Send email notifications to managers about their team members' missing timesheets"""
-    logger.info(f"Starting manager notifications for {len(designers)} designers")
-    
-    if not st.session_state.email_enabled:
-        logger.info("Email sending is disabled, skipping manager notifications")
-        return False, 0, 0
-        
-    if not (st.session_state.smtp_server and 
-            st.session_state.smtp_port and
-            st.session_state.smtp_username and 
-            st.session_state.smtp_password):
-        logger.error("Email settings not configured")
-        return False, 0, 0
-    
-    try:
-        # Load employee-manager mapping
-        employee_manager_mapping = load_employee_manager_mapping()
-        if not employee_manager_mapping:
-            logger.error("Could not load employee-manager mapping")
-            return False, 0, 0
-        
-        # Group tasks by manager
-        managers_tasks = {}
-        
-        # Debug log all designers
-        logger.info(f"Designers with missing timesheets: {list(designers.keys())}")
-        
-        for designer, tasks in designers.items():
-            logger.info(f"Processing designer: '{designer}' with {len(tasks)} missing tasks")
-            
-            # Find the manager for this designer
-            if designer in employee_manager_mapping:
-                manager_info = employee_manager_mapping[designer]
-                manager_name = manager_info["manager_name"]
-                manager_email = manager_info["manager_email"]
-                
-                logger.info(f"Found manager for '{designer}': {manager_name} ({manager_email})")
-                
-                if manager_name not in managers_tasks:
-                    managers_tasks[manager_name] = {
-                        "email": manager_email,
-                        "designers": {}
-                    }
-                
-                if designer not in managers_tasks[manager_name]["designers"]:
-                    managers_tasks[manager_name]["designers"][designer] = []
-                
-                managers_tasks[manager_name]["designers"][designer].extend(tasks)
-                logger.info(f"Added {len(tasks)} tasks for '{designer}' to manager '{manager_name}'")
-            else:
-                logger.warning(f"No manager found for designer '{designer}' - check name spelling in data file")
-        
-        # Send emails to managers
-        success_count = 0
-        fail_count = 0
-        
-        logger.info(f"Preparing to send emails to {len(managers_tasks)} managers")
-        
-        for manager_name, manager_data in managers_tasks.items():
-            logger.info(f"Sending email to manager: {manager_name} ({manager_data['email']})")
-            logger.info(f"Email will include {len(manager_data['designers'])} team members with missing timesheets")
-            
-            # List the team members for debugging
-            for designer_name, designer_tasks in manager_data["designers"].items():
-                logger.info(f"  - Designer: {designer_name} has {len(designer_tasks)} missing entries")
-            
-            # Prepare email content
-            email_sent = send_manager_email(
-                manager_name,
-                manager_data["email"],
-                manager_data["designers"],
-                selected_date
-            )
-            
-            if email_sent:
-                logger.info(f"Successfully sent email to manager: {manager_name}")
-                success_count += 1
-            else:
-                logger.error(f"Failed to send email to manager: {manager_name}")
-                fail_count += 1
-        
-        logger.info(f"Manager notification summary: {success_count} successful, {fail_count} failed")
-        return True, success_count, fail_count
-    except Exception as e:
-        error_details = traceback.format_exc()
-        logger.error(f"Error sending manager notifications: {e}\n{error_details}")
-        return False, 0, 0
-
-def generate_missing_timesheet_report(selected_date, shift_status_filter=None, send_email=False, send_designer_emails=False):
-    """
-    Generate report of planning slots without timesheet entries for a date range from reference_date to selected_date
-    """
-    uid = st.session_state.odoo_uid
-    models = st.session_state.odoo_models
-    odoo_db = st.session_state.odoo_db
-    odoo_password = st.session_state.odoo_password
-    reference_date = st.session_state.reference_date
-    
-    if not uid or not models:
-        st.error("Not connected to Odoo")
-        return pd.DataFrame(), 0, 0
-    
-    try:
-        # Step 1: Get all planning slots for the date range (reference_date to selected_date) with optional shift status filter
-        planning_slots = get_planning_slots(models, uid, odoo_db, odoo_password, reference_date, selected_date, shift_status_filter)
-        
-        # Post-process to ensure only slots with the correct shift status are included
-        # This adds a second layer of filtering in case the Odoo query didn't filter properly
-        if shift_status_filter:
-            filtered_slots = []
-            for slot in planning_slots:
-                slot_shift_status = slot.get('x_studio_shift_status', '')
-                if slot_shift_status == shift_status_filter:
-                    filtered_slots.append(slot)
-            planning_slots = filtered_slots
-            logger.info(f"Post-filtered to {len(planning_slots)} slots with x_studio_shift_status={shift_status_filter}")
-        
-        # Step 2: Get all timesheet entries for the date range
-        timesheet_entries = get_timesheet_entries(models, uid, odoo_db, odoo_password, reference_date, selected_date)
-        
-        # Step 3: Get reference data
-        ref_data = get_references_data(models, uid, odoo_db, odoo_password)
-        
-        # Step 4: Create resource+task+project to timesheet entry mapping
-        # This ensures we match timesheets to specific tasks, not just to designers
-        resource_task_to_timesheet = {}
-        for entry in timesheet_entries:
-            employee_id = None
-            task_id = None
-            project_id = None
-            
-            # Get employee ID
-            if 'employee_id' in entry and entry['employee_id']:
-                if isinstance(entry['employee_id'], list):
-                    employee_id = entry['employee_id'][0]
-                elif isinstance(entry['employee_id'], int):
-                    employee_id = entry['employee_id']
-            
-            # Get task ID 
-            if 'task_id' in entry and entry['task_id']:
-                if isinstance(entry['task_id'], list):
-                    task_id = entry['task_id'][0]
-                elif isinstance(entry['task_id'], int):
-                    task_id = entry['task_id']
-            
-            # Get project ID
-            if 'project_id' in entry and entry['project_id']:
-                if isinstance(entry['project_id'], list):
-                    project_id = entry['project_id'][0]
-                elif isinstance(entry['project_id'], int):
-                    project_id = entry['project_id']
-            
-            # Get user ID (who actually created/logged the entry)
-            user_id = None
-            if 'user_id' in entry and entry['user_id']:
-                if isinstance(entry['user_id'], list):
-                    user_id = entry['user_id'][0]
-                elif isinstance(entry['user_id'], int):
-                    user_id = entry['user_id']
-            
-            if employee_id:
-                # Create a unique key combining resource, task, and project
-                # If task or project is None, we'll still create a key
-                key = (employee_id, task_id, project_id)
-                
-                if key in resource_task_to_timesheet:
-                    resource_task_to_timesheet[key]['hours'] += entry.get('unit_amount', 0)
-                    resource_task_to_timesheet[key]['entries'].append(entry)
-                    resource_task_to_timesheet[key]['user_ids'].add(user_id)
-                else:
-                    resource_task_to_timesheet[key] = {
-                        'hours': entry.get('unit_amount', 0),
-                        'entries': [entry],
-                        'user_ids': {user_id} if user_id else set()
-                    }
-        
-        # Add name-based mapping as a fallback
-        # Sometimes the IDs don't match correctly but names will
-        designer_name_to_timesheet = {}
-        for entry in timesheet_entries:
-            employee_name = None
-            task_id = None
-            project_id = None
-            
-            # Get employee name
-            if 'employee_id' in entry and entry['employee_id'] and isinstance(entry['employee_id'], list) and len(entry['employee_id']) > 1:
-                employee_name = entry['employee_id'][1]  # The second element in many Odoo relations is the name
-            
-            # Get task ID 
-            if 'task_id' in entry and entry['task_id']:
-                if isinstance(entry['task_id'], list):
-                    task_id = entry['task_id'][0]
-                elif isinstance(entry['task_id'], int):
-                    task_id = entry['task_id']
-            
-            # Get project ID
-            if 'project_id' in entry and entry['project_id']:
-                if isinstance(entry['project_id'], list):
-                    project_id = entry['project_id'][0]
-                elif isinstance(entry['project_id'], int):
-                    project_id = entry['project_id']
-            
-            # Get user ID (who actually created/logged the entry)
-            user_id = None
-            if 'user_id' in entry and entry['user_id']:
-                if isinstance(entry['user_id'], list):
-                    user_id = entry['user_id'][0]
-                elif isinstance(entry['user_id'], int):
-                    user_id = entry['user_id']
-            
-            if employee_name:
-                # Create a unique key combining employee name, task, and project
-                key = (employee_name, task_id, project_id)
-                
-                if key in designer_name_to_timesheet:
-                    designer_name_to_timesheet[key]['hours'] += entry.get('unit_amount', 0)
-                    designer_name_to_timesheet[key]['entries'].append(entry)
-                    designer_name_to_timesheet[key]['user_ids'].add(user_id)
-                else:
-                    designer_name_to_timesheet[key] = {
-                        'hours': entry.get('unit_amount', 0),
-                        'entries': [entry],
-                        'user_ids': {user_id} if user_id else set()
-                    }
-        
-        # Also create a name-only mapping as a last resort
-        designer_name_only_to_timesheet = {}
-        for entry in timesheet_entries:
-            employee_name = None
-            
-            # Get employee name
-            if 'employee_id' in entry and entry['employee_id'] and isinstance(entry['employee_id'], list) and len(entry['employee_id']) > 1:
-                employee_name = entry['employee_id'][1]
-            
-            # Get user ID (who actually created/logged the entry)
-            user_id = None
-            if 'user_id' in entry and entry['user_id']:
-                if isinstance(entry['user_id'], list):
-                    user_id = entry['user_id'][0]
-                elif isinstance(entry['user_id'], int):
-                    user_id = entry['user_id']
-            
-            if employee_name:
-                if employee_name in designer_name_only_to_timesheet:
-                    designer_name_only_to_timesheet[employee_name]['hours'] += entry.get('unit_amount', 0)
-                    designer_name_only_to_timesheet[employee_name]['entries'].append(entry)
-                    designer_name_only_to_timesheet[employee_name]['user_ids'].add(user_id)
-                else:
-                    designer_name_only_to_timesheet[employee_name] = {
-                        'hours': entry.get('unit_amount', 0),
-                        'entries': [entry],
-                        'user_ids': {user_id} if user_id else set()
-                    }
-        
-        # Log the mappings to help with debugging
-        logger.info(f"Found {len(resource_task_to_timesheet)} resource+task+project timesheet combinations")
-        logger.info(f"Found {len(designer_name_to_timesheet)} name+task+project timesheet combinations")
-        logger.info(f"Found {len(designer_name_only_to_timesheet)} unique designer names with timesheets")
-                
-        # Step 5: Find resource IDs from employee IDs
-        # This is needed because planning uses resource.resource while timesheet uses hr.employee
-        employee_to_resource = {}
-        
-        # Try to map employees to resources using user_id as the link
-        for resource_id, resource in ref_data.get('resources', {}).items():
-            if resource.get('user_id') and isinstance(resource.get('user_id'), list) and len(resource.get('user_id')) > 0:
-                user_id = resource.get('user_id')[0]
-                # Store user_id -> resource_id mapping
-                employee_to_resource[user_id] = resource_id
-        
-        # Step 6: Generate report data
-        report_data = []
-        
-        # Dictionary to group tasks by designer
-        designers = {}
-        
-        for slot in planning_slots:
-            # Get resource info
-            resource_id = None
-            if 'resource_id' in slot and slot['resource_id'] and isinstance(slot['resource_id'], list):
-                resource_id = slot['resource_id'][0]
-                resource_name = slot['resource_id'][1] if len(slot['resource_id']) > 1 else "Unknown"
-            else:
-                resource_name = "Unknown"
-            
-            # Get task ID
-            task_id = None
-            if 'task_id' in slot and slot['task_id'] and isinstance(slot['task_id'], list):
-                task_id = slot['task_id'][0]
-                task_name = "Unknown"
-                if task_id in ref_data.get('tasks', {}):
-                    task_name = ref_data['tasks'][task_id].get('name', 'Unknown')
-            else:
-                task_name = "Unknown"
-            
-            # Get project ID
-            project_id = None
-            if 'project_id' in slot and slot['project_id'] and isinstance(slot['project_id'], list):
-                project_id = slot['project_id'][0]
-                project_name = "Unknown"
-                if project_id in ref_data.get('projects', {}):
-                    project_name = ref_data['projects'][project_id].get('name', 'Unknown')
-            else:
-                project_name = "Unknown"
-            
-            # Check if this resource/employee has logged time for this specific task/project using tiered approach
-            has_timesheet = False
-            hours_logged = 0.0
-            
-            # First check: exact match by resource_id + task_id + project_id
-            key = (resource_id, task_id, project_id)
-            if key in resource_task_to_timesheet:
-                hours_logged = resource_task_to_timesheet[key]['hours']
-                
-                # Get the user_id associated with the resource (if available)
-                resource_user_id = None
-                if resource_id in ref_data.get('resources', {}) and ref_data['resources'][resource_id].get('user_id'):
-                    resource_details = ref_data['resources'][resource_id]
-                    if isinstance(resource_details['user_id'], list) and len(resource_details['user_id']) > 0:
-                        resource_user_id = resource_details['user_id'][0]
-                    elif isinstance(resource_details['user_id'], int):
-                        resource_user_id = resource_details['user_id']
-                
-                # Only consider it a valid timesheet if hours logged are greater than 0
-                # AND the entry was created by the designer (their user_id is in the user_ids set)
-                user_ids = resource_task_to_timesheet[key]['user_ids']
-                has_timesheet = specific_date_has_timesheet
-            
-            # # Second check: try matching by name + task_id + project_id
-            # if not has_timesheet and resource_name != "Unknown":
-            #     name_key = (resource_name, task_id, project_id)
-            #     if name_key in designer_name_to_timesheet:
-            #         hours_logged = designer_name_to_timesheet[name_key]['hours']
-            #         has_timesheet = hours_logged > 0
-            
-            # # Last resort: check if designer has ANY timesheet for the day
-            # if not has_timesheet and resource_name != "Unknown":
-            #     if resource_name in designer_name_only_to_timesheet:
-            #         hours_logged = designer_name_only_to_timesheet[resource_name]['hours']
-            #         has_timesheet = hours_logged > 0
-            
-            # Get other slot info for display
-            slot_name = slot.get('name', 'Unnamed Slot')
-            
-            # Convert boolean values to strings
-            if isinstance(slot_name, bool):
-                slot_name = str(slot_name)
-            
-            # Get shift status for display
-            shift_status = slot.get('x_studio_shift_status', 'Unknown')
-            
-            # Get client success member (create_uid)
-            client_success_name = "Unknown"
-            if 'create_uid' in slot and slot['create_uid'] and isinstance(slot['create_uid'], list):
-                create_uid = slot['create_uid'][0]
-                if create_uid in ref_data.get('users', {}):
-                    client_success_name = ref_data['users'][create_uid].get('name', 'Unknown')
-            
-            # Format start and end times for display
-            start_datetime = slot.get('start_datetime', '')
-            end_datetime = slot.get('end_datetime', '')
-            
-            start_time = "Unknown"
-            end_time = "Unknown"
-            
-            if start_datetime and isinstance(start_datetime, str):
-                try:
-                    # Convert string to datetime
-                    start_dt = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M:%S")
-                    start_dt = start_dt + timedelta(hours=3)
-                    start_time = start_dt.strftime("%H:%M")
-                except:
-                    start_time = start_datetime
-            
-            if end_datetime and isinstance(end_datetime, str):
-                try:
-                    # Convert string to datetime
-                    end_dt = datetime.strptime(end_datetime, "%Y-%m-%d %H:%M:%S")
-                    end_dt = end_dt + timedelta(hours=3)
-                    end_time = end_dt.strftime("%H:%M")
-                except:
-                    end_time = end_datetime
-            
-            # Get time allocation
-            allocated_hours = slot.get('allocated_hours', 0.0)
-            
-            # Extract task date from slot data
-            task_date = None
-            if start_datetime and isinstance(start_datetime, str):
-                try:
-                    # Convert string to datetime
-                    task_date = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M:%S").date()
-                except:
-                    # If parsing fails, use the selected date
-                    task_date = selected_date
-            else:
-                # Fallback if no valid start_datetime
-                task_date = selected_date
-            # Calculate daily allocated hours for this specific date
-            daily_allocated_hours = allocated_hours
-            if start_datetime and end_datetime and isinstance(start_datetime, str) and isinstance(end_datetime, str):
-                try:
-                    # Parse the start and end times
-                    start_dt = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M:%S")
-                    end_dt = datetime.strptime(end_datetime, "%Y-%m-%d %H:%M:%S")
-                    
-                    # Calculate the number of work days (each calendar day counts as one full day)
-                    start_date = start_dt.date()
-                    end_date = end_dt.date()
-                    total_days = (end_date - start_date).days + 1  # +1 to include both start and end dates                    
-                    # Only adjust allocation if task spans multiple days (more than 1 day)
-                    if total_days > 1.0:
-                        # Divide the total hours by the number of days (simple approach)
-                        daily_allocated_hours = allocated_hours / total_days
-                        logger.info(f"Task spans {total_days:.2f} days. Adjusted allocated hours from {allocated_hours} to {daily_allocated_hours:.2f} per day")
-                except Exception as e:
-                    logger.warning(f"Error calculating daily hours: {e}")
-                        # Get sub task link
-            sub_task_link = ""
-            raw_sub_task_link = slot.get('x_studio_sub_task_link', False)
-            logger.info(f"Original sub_task_link: {sub_task_link}, Type: {type(sub_task_link)}")
-
-            # If we have a valid relation field, construct a proper Odoo URL
-            if isinstance(raw_sub_task_link, list) and len(raw_sub_task_link) > 0:
-                sub_task_id = raw_sub_task_link[0]  # Get the ID (first element)
-                if sub_task_id:
-                    # Construct Odoo task URL
-                    base_url = st.session_state.odoo_url
-                    sub_task_link = f"{base_url}/web#id={sub_task_id}&model=project.task&view_type=form"
-                    logger.info(f"Constructed Odoo URL for task: {sub_task_link}")
-            else:
-                # Use the original handling for other cases
-                sub_task_link = raw_sub_task_link
-            # For multi-day tasks, we need to check timesheet entries for the specific day
-            specific_date_has_timesheet = False
-
-            # Only consider timesheet entries for the exact day of this slot
-            date_specific_entries = []
-            if task_date:
-                formatted_task_date = task_date.strftime("%Y-%m-%d")
-                
-                # If this is a matching resource_id, task_id, project_id combination
-                key = (resource_id, task_id, project_id)
-                if key in resource_task_to_timesheet:
-                    # Filter entries by this specific date
-                    for entry in resource_task_to_timesheet[key]['entries']:
-                        entry_date = entry.get('date', '')
-                        if entry_date == formatted_task_date:
-                            date_specific_entries.append(entry)
-                            
-                    # Only consider it a valid timesheet if there are entries for THIS date
-                    specific_date_has_timesheet = len(date_specific_entries) > 0 and sum(e.get('unit_amount', 0) for e in date_specific_entries) > 0
-                    
-                # Also check by name
-                if not specific_date_has_timesheet and resource_name != "Unknown":
-                    name_key = (resource_name, task_id, project_id)
-                    if name_key in designer_name_to_timesheet:
-                        # Filter entries by this specific date
-                        for entry in designer_name_to_timesheet[name_key]['entries']:
-                            entry_date = entry.get('date', '')
-                            if entry_date == formatted_task_date:
-                                date_specific_entries.append(entry)
-                                
-                        specific_date_has_timesheet = len(date_specific_entries) > 0 and sum(e.get('unit_amount', 0) for e in date_specific_entries) > 0
-            # Ensure we have a valid URL format if it's not empty
-            if sub_task_link and isinstance(sub_task_link, str):
-                # Add the protocol if missing but looks like a URL
-                if not (sub_task_link.startswith('http') or sub_task_link.startswith('/')):
-                    if '.' in sub_task_link and not sub_task_link.startswith('www.'):
-                        sub_task_link = 'https://' + sub_task_link
-                        logger.info(f"Added https:// to link: {sub_task_link}")
-            # Calculate days since task date for urgency
-            reference_point = selected_date
-            days_since_task = (reference_point - task_date).days
-            
-            # Only include if:
-            # 1. We want all slots (debug mode) OR it has no timesheet
-            # 2. We don't need to check against reference_date because we're already querying from that date
-            if (st.session_state.debug_mode or not has_timesheet):
-                task_data = {
-                    'Date': task_date.strftime("%Y-%m-%d"),
-                    'Designer': str(resource_name),
-                    'Project': str(project_name),
-                    'Client Success Member': str(client_success_name),
-                    'Task': str(task_name),
-                    # 'Slot Name': str(slot_name),
-                    'Start Time': str(start_time),
-                    'End Time': str(end_time),
-                    'Allocated Hours': float(daily_allocated_hours),
-                    # 'Shift Status': str(shift_status),
-                    'Days Overdue': int(days_since_task),
-                    'Urgency': 'High' if days_since_task >= 2 else ('Medium' if days_since_task == 1 else 'Low'),
-                    'Sub_Task_Link': str(sub_task_link)  # Add this line
-                }
-                
-                report_data.append(task_data)
-                
-                # Also add to designers dictionary for notifications
-                if resource_name not in designers:
-                    designers[resource_name] = []
-                designers[resource_name].append(task_data)
-        
-        # Convert to DataFrame
-        if report_data:
-            # Ensure all values are properly converted to appropriate types
-            for item in report_data:
-                # Convert any boolean values to strings
-                for key, value in item.items():
-                    if isinstance(value, bool):
-                        item[key] = str(value)
-                    # Handle other problematic types if needed
-                    elif value is None:
-                        item[key] = ""
-            
-            df = pd.DataFrame(report_data)
-            
-            # Count missing entries based on what's in report_data when not in debug mode
-            missing_count = len(report_data) if not st.session_state.debug_mode else len([slot for slot in planning_slots if not (
-                # First check: exact match by resource_id + task_id + project_id
-                (slot.get('resource_id') and slot.get('task_id') and slot.get('project_id') and 
-                (slot['resource_id'][0], slot['task_id'][0], slot['project_id'][0]) in resource_task_to_timesheet and
-                resource_task_to_timesheet[(slot['resource_id'][0], slot['task_id'][0], slot['project_id'][0])]['hours'] > 0) or
-                
-                # Second check: try matching by name + task_id + project_id
-                (slot.get('resource_id') and slot.get('task_id') and slot.get('project_id') and
-                len(slot['resource_id']) > 1 and
-                (slot['resource_id'][1], slot['task_id'][0], slot['project_id'][0]) in designer_name_to_timesheet and
-                designer_name_to_timesheet[(slot['resource_id'][1], slot['task_id'][0], slot['project_id'][0])]['hours'] > 0) or
-                
-                # Last resort: check if designer has ANY timesheet for the day
-                (slot.get('resource_id') and len(slot['resource_id']) > 1 and
-                slot['resource_id'][1] in designer_name_only_to_timesheet and
-                designer_name_only_to_timesheet[slot['resource_id'][1]]['hours'] > 0)
-            )])
-            
-            # Send email report if requested
-            if send_email and (missing_count > 0 or st.session_state.debug_mode):
-                email_sent = send_email_report(df, selected_date, missing_count, len(timesheet_entries), shift_status_filter, reference_date)
-                if email_sent:
-                    st.success(f"Email report sent to {st.session_state.email_recipient}")
-                else:
-                    st.warning("Failed to send email report. Check email settings.")
-            
-            # Send individual emails to designers if enabled
-            if ((send_designer_emails or st.session_state.designer_emails_enabled) and 
-                st.session_state.smtp_server and 
-                st.session_state.smtp_port and
-                st.session_state.smtp_username and 
-                st.session_state.smtp_password and
-                st.session_state.designer_email_mapping and
-                (missing_count > 0 or st.session_state.debug_mode)):
-                
-                try:
-                    # SMTP settings
-                    smtp_settings = {
-                        "server": st.session_state.smtp_server,
-                        "port": st.session_state.smtp_port,
-                        "username": st.session_state.smtp_username,
-                        "password": st.session_state.smtp_password
-                    }
-                    
-                    email_success_count = 0
-                    email_fail_count = 0
-                    
-                    # Send email to each designer with missing timesheets
-                    for designer, tasks in designers.items():
-                        # Check if we have an email mapping for this designer
-                        if designer in st.session_state.designer_email_mapping:
-                            designer_email = st.session_state.designer_email_mapping[designer]
-                            
-                            # Send the email
-                            email_sent = send_designer_email(
-                                designer,
-                                designer_email,
-                                selected_date,
-                                tasks,
-                                smtp_settings
-                            )
-                            
-                            if email_sent:
-                                email_success_count += 1
-                            else:
-                                email_fail_count += 1
-                        else:
-                            logger.info(f"No email mapping found for designer {designer}")
-                    
-                    # Show summary
-                    if email_success_count > 0:
-                        st.success(f"Sent emails to {email_success_count} designers")
-                    if email_fail_count > 0:
-                        st.warning(f"Failed to send emails to {email_fail_count} designers")
-                            
-                except Exception as e:
-                    error_details = traceback.format_exc()
-                    logger.error(f"Error sending designer emails: {e}\n{error_details}")
-                    st.warning(f"Error sending designer emails: {e}")
-            
-            # Send Teams webhook notifications if enabled
-            if st.session_state.webhooks_enabled and (missing_count > 0 or st.session_state.debug_mode):
-                webhook_success_count = 0
-                webhook_fail_count = 0
-                
-                try:
-                    # Option 1: Test mode - send all notifications to test webhook
-                    if st.session_state.test_webhook_url and not st.session_state.designer_webhook_mapping:
-                        # Collect all tasks from all designers into one message 
-                        all_tasks = []
-                        for designer, tasks in designers.items():
-                            # Add designer name to each task
-                            for task in tasks:
-                                task_copy = task.copy()
-                                task_copy['Designer'] = designer
-                                all_tasks.append(task_copy)
-                        
-                        # Send to test webhook
-                        webhook_sent = send_teams_webhook_notification(
-                            "All Designers (Test Mode)",
-                            st.session_state.test_webhook_url,
-                            all_tasks,
-                            selected_date
-                        )
-                        
-                        if webhook_sent:
-                            webhook_success_count += 1
-                            st.success(f"Sent combined Teams notification to your test webhook")
-                        else:
-                            webhook_fail_count += 1
-                            st.warning("Failed to send Teams notification to test webhook")
-                    
-                    # Option 2: Production mode - send to individual designers
-                    else:
-                        for designer, tasks in designers.items():
-                            # First check if designer has a webhook mapping
-                            if designer in st.session_state.designer_webhook_mapping:
-                                webhook_url = st.session_state.designer_webhook_mapping[designer]
-                                
-                                # Send the webhook notification
-                                webhook_sent = send_teams_webhook_notification(
-                                    designer,
-                                    webhook_url,
-                                    tasks,
-                                    selected_date
-                                )
-                                
-                                if webhook_sent:
-                                    webhook_success_count += 1
-                                else:
-                                    webhook_fail_count += 1
-                        
-                        # Show summary if any webhooks were processed
-                        if webhook_success_count + webhook_fail_count > 0:
-                            if webhook_success_count > 0:
-                                st.success(f"Sent Teams webhook notifications to {webhook_success_count} designers")
-                            if webhook_fail_count > 0:
-                                st.warning(f"Failed to send Teams webhook notifications to {webhook_fail_count} designers")
-                
-                except Exception as e:
-                    error_details = traceback.format_exc()
-                    logger.error(f"Error sending Teams webhook notifications: {e}\n{error_details}")
-                    st.warning(f"Error sending Teams webhook notifications: {e}")
-            # Add after the Teams webhook notification section
-            # Send Teams direct messages if enabled
-            if st.session_state.teams_direct_msg_enabled and (missing_count > 0 or st.session_state.debug_mode):
-                try:
-                    sent, success_count, fail_count = send_designer_teams_direct_messages(designers, selected_date)
-                    
-                    if sent:
-                        if success_count > 0:
-                            st.success(f"Sent Teams direct messages to {success_count} designers")
-                        if fail_count > 0:
-                            st.warning(f"Failed to send Teams direct messages to {fail_count} designers")
-                except Exception as e:
-                    error_details = traceback.format_exc()
-                    logger.error(f"Error sending Teams direct messages: {e}\n{error_details}")
-                    st.warning(f"Error sending Teams direct messages: {e}")
-            # Add right after the Teams direct messages section in the generate_missing_timesheet_report function 
-            # (around line 1155, after "st.warning(f"Failed to send Teams direct messages to {fail_count} designers")")
-            # Send manager notifications if enabled
-            if st.session_state.manager_emails_enabled and (missing_count > 0 or st.session_state.debug_mode):
-                try:
-                    sent, success_count, fail_count = send_manager_notifications(
-                        designers, 
-                        selected_date,
-                        reference_date
-                    )
-                    
-                    if sent:
-                        if success_count > 0:
-                            st.success(f"Sent notifications to {success_count} managers")
-                        if fail_count > 0:
-                            st.warning(f"Failed to send notifications to {fail_count} managers")
-                except Exception as e:
-                    error_details = traceback.format_exc()
-                    logger.error(f"Error sending manager notifications: {e}\n{error_details}")
-                    st.warning(f"Error sending manager notifications: {e}")
-            
-            return df, missing_count, len(timesheet_entries)
-        else:
-            # Return empty DataFrame with columns
-            empty_df = pd.DataFrame(columns=[
-                'Date', 'Designer', 'Project', 'Client Success Member', 'Task', 
-                'Start Time', 'End Time', 'Allocated Hours', 'Days Overdue', 'Urgency'
-            ])
-            
-            # Send email for empty report if requested
-            if send_email:
-                email_sent = send_email_report(empty_df, selected_date, 0, len(timesheet_entries), shift_status_filter, reference_date)
-                if email_sent:
-                    st.success(f"Email report sent to {st.session_state.email_recipient}")
-                else:
-                    st.warning("Failed to send email report. Check email settings.")
-                
-            return empty_df, 0, len(timesheet_entries)
-    except Exception as e:
-        error_details = traceback.format_exc()
-        logger.error(f"Error generating report: {e}\n{error_details}")
-        st.error(f"Error generating report: {e}")
-        st.session_state.last_error = error_details
-        return pd.DataFrame(), 0, len(timesheet_entries) if 'timesheet_entries' in locals() else 0
-
-def send_teams_webhook_notification(
-        designer_name: str,
-        webhook_url: str,
-        tasks: list,
-        report_date: date
-    ):
-    """
-    Post a short adaptive-card–compatible message to Teams.
-    """
-    try:
-        max_days_overdue = max(t.get("Days Overdue", 0) for t in tasks)
-        one_day  = (max_days_overdue == 1)
-        two_plus = (max_days_overdue >= 2)
-
-        if one_day:
-            title = "Quick Nudge – Log Your Hours"
-            emoji = "🟠"
-            intro = ("This is a gentle reminder to log your hours for the "
-                     "task below — it only takes a minute:")
-        else:
-            title = "Heads-Up: You've Missed Logging Hours for 2 Days"
-            emoji = "🔴"
-            intro = ("It looks like no hours have been logged for the past "
-                     "two days for the task(s) below:")
-
-        # convert task list to bullet points
-        bullet_lines = []
-        for t in tasks:
-            bullet_lines.append(
-                f"- **{t.get('Task','?')}** "
-                f"(Project: {t.get('Project','?')}, "
-                f"Assigned on: {t.get('Date','?')}, "
-                f"CS: {t.get('Client Success Member','?')})"
-            )
-        bullets = "\n".join(bullet_lines)
-
-        card_text = (f"{emoji} **{title}**\n\n"
-                     f"{intro}\n\n{bullets}\n\n"
-                     "If something's blocking you, let us know – we're here "
-                     "to help!")
-
-        # basic card
-        payload = {"text": card_text}
-
-        resp = requests.post(webhook_url, json=payload, timeout=10)
-        if resp.status_code == 200:
-            logger.info("Teams webhook sent for %s", designer_name)
-            return True
-        else:
-            logger.error("Teams webhook failed: %s %s",
-                         resp.status_code, resp.text)
-            return False
-
-    except Exception as exc:
-        logger.error("send_teams_webhook_notification failed: %s",
-                     exc, exc_info=True)
-        return False
-
-
-def main():
-    params = st.query_params
-    if "headless" in params:
-        st.session_state.headless_mode = True
-        if "date" in params:
-            date_param = params["date"][0]
-            if date_param == "today":
-                report_date = datetime.now().date()
-            else:
-                try:
-                    report_date = datetime.strptime(date_param, "%Y-%m-%d").date()
-                except ValueError:
-                    report_date = datetime.now().date()
-        else:
-            report_date = datetime.now().date()
-            
-        # Set params based on URL parameters
-        send_email = "email" in params and params["email"][0].lower() == "true"
-        send_designer_emails = "designer_emails" in params and params["designer_emails"][0].lower() == "true"
-        
-        if "shift_status" in params:
-            shift_status = params["shift_status"][0].lower()
-            if shift_status == "all":
-                shift_status_filter = None
-            elif shift_status == "forecasted":
-                shift_status_filter = "Forecasted"
-            else:
-                shift_status_filter = "Planned"
-        else:
-            shift_status_filter = "Planned"
-        
-        # Connect to Odoo and run the report
-        uid, models = authenticate_odoo(
-            st.session_state.odoo_url,
-            st.session_state.odoo_db,
-            st.session_state.odoo_username,
-            st.session_state.odoo_password
-        )
-        
-        if uid and models:
-            st.session_state.odoo_uid = uid
-            st.session_state.odoo_models = models
-            
-            # Generate report and send email
-            df, missing_count, timesheet_count = generate_missing_timesheet_report(
-                report_date, 
-                shift_status_filter,
-                send_email,
-                send_designer_emails
-            )
-            
-            st.write("Headless report generated successfully")
-            st.write(f"Found {missing_count} missing entries out of {timesheet_count} timesheet entries")
-            # Add an early return to skip the rest of the UI rendering
-            return
-
-    st.title("Missing Timesheet Reporter (Planning-Focused)")
-    
-    # Add a debug container that's initially hidden
-    if 'debug_container' not in st.session_state:
-        st.session_state.debug_container = None
-    if 'debug_messages' not in st.session_state:
-        st.session_state.debug_messages = []
-    
-    # Create a function to show debug info in the UI
-    def debug_print(message, level="info"):
-        """Add a debug message to be displayed in the UI"""
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        st.session_state.debug_messages.append({
-            "time": timestamp,
-            "message": message,
-            "level": level
-        })
-        # Also log to regular logger
-        if level == "error":
-            logger.error(message)
-        elif level == "warning":
-            logger.warning(message)
-        else:
-            logger.info(message)
-    
-    # Create sidebar for options
-    with st.sidebar:
-        st.title("Options")
-        
-        # Debug mode toggle
-        st.session_state.debug_mode = st.checkbox("Debug Mode", st.session_state.debug_mode, 
-                                                 help="Show all planning slots, not just those missing timesheets")
-        
-        # Shift Status filter
-        st.subheader("Shift Status Filter")
-        shift_status_filter = st.radio(
-            "Show slots with shift status:",
-            ["All", "Planned (Confirmed)", "Forecasted (Unconfirmed)"],
-            index=1,  # Default to "Planned (Confirmed)"
-            help="Filter planning slots by their shift status"
-        )
-
-        # Update the shift status filter value based on selection
-        if shift_status_filter == "All":
-            st.session_state.shift_status_filter = None
-        elif shift_status_filter == "Planned (Confirmed)":
-            st.session_state.shift_status_filter = "Planned"
-        elif shift_status_filter == "Forecasted (Unconfirmed)":
-            st.session_state.shift_status_filter = "Forecasted"
-        
-        # Reference date setting for filtering historical tasks
-        st.subheader("Reference Date")
-        st.session_state.reference_date = st.date_input(
-            "Reference date (ignore tasks before this date)",
-            st.session_state.reference_date,
-            help="Tasks before this date will be ignored to avoid alerting on historical data"
-        )
-        
-        # Email notification settings
-        with st.expander("Email Notifications", expanded=False):
-            st.session_state.email_enabled = st.checkbox("Enable Email Reports", st.session_state.email_enabled,
-                                                        help="Send email reports when generated")
-            
-            st.session_state.email_recipient = st.text_input("Email Recipient", 
-                                                            st.session_state.email_recipient,
-                                                            help="Email address to send reports to")
-            
-            st.session_state.smtp_server = st.text_input("SMTP Server", 
-                                                        st.session_state.smtp_server,
-                                                        help="SMTP server for sending emails")
-            
-            st.session_state.smtp_port = st.number_input("SMTP Port", 
-                                                        min_value=1, 
-                                                        max_value=65535, 
-                                                        value=st.session_state.smtp_port,
-                                                        help="SMTP port (usually 587 for TLS)")
-            
-            st.session_state.smtp_username = st.text_input("SMTP Username", 
-                                                          st.session_state.smtp_username,
-                                                          help="Username for SMTP authentication")
-            
-            st.session_state.smtp_password = st.text_input("SMTP Password", 
-                                                          type="password",
-                                                          value=st.session_state.smtp_password,
-                                                          help="Password for SMTP authentication")
-            
-            st.markdown("""
-            **Note:** For Gmail, you need to use an App Password instead of your regular password. 
-            [Learn more](https://support.google.com/accounts/answer/185833)
-            """)
-            
-            if st.button("Test Email"):
-                try:
-                    if not st.session_state.smtp_username or not st.session_state.smtp_password:
-                        st.error("SMTP credentials are required")
-                    else:
-                        # Create test email
-                        msg = MIMEMultipart()
-                        msg['From'] = st.session_state.smtp_username
-                        msg['To'] = st.session_state.email_recipient
-                        msg['Subject'] = "Test Email from Missing Timesheet Reporter"
-                        
-                        body = """
-                        <html>
-                        <body>
-                        <h2>Test Email</h2>
-                        <p>This is a test email from the Missing Timesheet Reporter tool.</p>
-                        <p>If you're receiving this, your email settings are configured correctly!</p>
-                        </body>
-                        </html>
-                        """
-                        
-                        msg.attach(MIMEText(body, 'html'))
-                        
-                        # Send email
-                        server = smtplib.SMTP(st.session_state.smtp_server, st.session_state.smtp_port)
-                        server.starttls()
-                        server.login(st.session_state.smtp_username, st.session_state.smtp_password)
-                        server.send_message(msg)
-                        server.quit()
-                        
-                        st.success(f"Test email sent to {st.session_state.email_recipient}")
-                except Exception as e:
-                    st.error(f"Failed to send test email: {e}")
-                    if st.session_state.debug_mode:
-                        st.code(traceback.format_exc())
-        
-        # Designer Email Notifications
-        with st.sidebar.expander("Designer Email Notifications", expanded=False):
-            st.session_state.designer_emails_enabled = st.checkbox(
-                "Enable Designer Email Notifications", 
-                st.session_state.designer_emails_enabled,
-                help="Send individual emails to designers about their missing timesheet entries"
-            )
-            
-            st.markdown("### Designer Email Mapping")
-            st.markdown("Map designer names to their email addresses:")
-            
-            # Allow adding new designer email mappings
-            col1, col2 = st.columns(2)
-            with col1:
-                new_designer = st.text_input("Designer Name", key="new_designer_name")
-            with col2:
-                new_email = st.text_input("Email Address", key="new_designer_email")
-            
-            if st.button("Add Designer"):
-                if new_designer and new_email:
-                    st.session_state.designer_email_mapping[new_designer] = new_email
-                    st.success(f"Added mapping for {new_designer}")
-                else:
-                    st.error("Please enter both designer name and email")
-            
-            # Display current mappings and allow removal
-            if st.session_state.designer_email_mapping:
-                st.markdown("### Current Mappings")
-                for idx, (designer, email) in enumerate(st.session_state.designer_email_mapping.items()):
-                    col1, col2, col3 = st.columns([3, 3, 1])
-                    with col1:
-                        st.text(designer)
-                    with col2:
-                        st.text(email)
-                    with col3:
-                        if st.button("Remove", key=f"remove_{idx}"):
-                            del st.session_state.designer_email_mapping[designer]
-                            st.rerun()
-            
-        # Add after the "Designer Email Notifications" section (around line 770)
-        with st.sidebar.expander("Manager Notifications", expanded=False):
-            st.session_state.manager_emails_enabled = st.checkbox(
-                "Enable Manager Notifications", 
-                value=st.session_state.manager_emails_enabled,
-                help="Send email notifications to managers about their team members' missing timesheets"
-            )
-            
-            st.markdown("### Manager Email Settings")
-            st.info("Manager notifications use the same email settings as the main email notifications. Make sure email notifications are configured.")
-            
-            # The file is already in the repository
-            st.success("✅ Employee data loaded from uhd_data.xlsx")
-            
-            # Test button
-            if st.button("Test Manager Notifications"):
-                if not st.session_state.email_enabled:
-                    st.error("Please enable email notifications first")
-                elif not (st.session_state.smtp_server and 
-                        st.session_state.smtp_port and
-                        st.session_state.smtp_username and 
-                        st.session_state.smtp_password):
-                    st.error("Please configure email settings first")
-                else:
-                    # Create test data
-                    test_manager_name = "Sanad Feras Khaleel Zaqtan"
-                    test_manager_email = "sanad.zaqtan@prezlab.com"
-                    
-                    # Create test designer task data
-                    test_designers = {
-                        "Test Designer": [
-                            {
-                                "Project": "Test Project",
-                                "Task": "Test Task",
-                                "Start Time": "09:00",
-                                "End Time": "17:00",
-                                "Allocated Hours": 8.0,
-                                "Date": datetime.now().date().strftime("%Y-%m-%d"),
-                                "Days Overdue": 1,
-                                "Client Success Member": "Test Manager"
-                            }
-                        ]
-                    }
-                    
-                    with st.spinner("Sending test manager notifications..."):
-                        # Send test notification directly
-                        email_sent = send_manager_email(
-                            test_manager_name,
-                            test_manager_email,
-                            test_designers,
-                            datetime.now().date()
-                        )
-                        
-                        if email_sent:
-                            st.success(f"Test notification sent to {test_manager_name} ({test_manager_email})")
-                        else:
-                            st.error(f"Failed to send test notification to {test_manager_name}")
-            # Add option to import mappings from CSV
-            st.markdown("### Import Mappings")
-            uploaded_file = st.file_uploader("Upload CSV with designer mappings", type="csv")
-            if uploaded_file is not None:
-                try:
-                    df = pd.read_csv(uploaded_file)
-                    if 'Designer' in df.columns and 'Email' in df.columns:
-                        for _, row in df.iterrows():
-                            designer = row['Designer']
-                            email = row['Email']
-                            if designer and email:
-                                st.session_state.designer_email_mapping[designer] = email
-                        st.success(f"Imported {len(df)} designer mappings")
-                    else:
-                        st.error("CSV must have 'Designer' and 'Email' columns")
-                except Exception as e:
-                    st.error(f"Error importing mappings: {e}")
-            
-            st.markdown("### Download Template")
-            if st.button("Download CSV Template"):
-                # Create template CSV
-                template_df = pd.DataFrame({
-                    'Designer': ['Designer Name 1', 'Designer Name 2'],
-                    'Email': ['designer1@example.com', 'designer2@example.com']
-                })
-                csv = template_df.to_csv(index=False)
-                
-                # Provide download
-                st.download_button(
-                    label="Download Template",
-                    data=csv,
-                    file_name="designer_email_template.csv",
-                    mime="text/csv"
-                )
-            
-            # Add test button
-            st.markdown("### Test Designer Email")
-            test_designer = st.selectbox(
-                "Select Designer to Test", 
-                options=list(st.session_state.designer_email_mapping.keys()) if st.session_state.designer_email_mapping else ["No designers added"]
-            )
-            
-            if st.button("Send Test Email"):
-                if not st.session_state.designer_email_mapping:
-                    st.error("Please add at least one designer email mapping")
-                elif not (st.session_state.smtp_server and st.session_state.smtp_port and 
-                        st.session_state.smtp_username and st.session_state.smtp_password):
-                    st.error("Please configure email settings in the Email Notifications section")
-                else:
-                    # Get test designer
-                    designer_email = st.session_state.designer_email_mapping.get(test_designer)
-                    
-                    # Create test task
-                    test_task = [{
-                        "Project": "Test Project",
-                        "Task": "Test Task",
-                        "Start Time": "09:00",
-                        "End Time": "17:00",
-                        "Allocated Hours": 8.0,
-                        "Date": datetime.now().date().strftime("%Y-%m-%d")
-                    }]
-                    
-                    # Send test email
-                    smtp_settings = {
-                        "server": st.session_state.smtp_server,
-                        "port": st.session_state.smtp_port,
-                        "username": st.session_state.smtp_username,
-                        "password": st.session_state.smtp_password
-                    }
-                    
-                    success = send_designer_email(
-                        test_designer,
-                        designer_email,
-                        datetime.now().date(),
-                        test_task,
-                        smtp_settings
-                    )
-                    
-                    if success:
-                        st.success(f"Test email sent to {test_designer} ({designer_email})")
-                    else:
-                        st.error("Failed to send test email. Check email settings and try again.")        
-        # Teams Webhooks Configuration
-        with st.sidebar.expander("Teams Webhooks (No Admin Required)", expanded=False):
-            st.session_state.webhooks_enabled = st.checkbox(
-                "Enable Teams Webhooks", 
-                value=st.session_state.webhooks_enabled,
-                help="Send notifications via Teams channel webhooks (no admin consent required)"
-            )
-            
-            st.markdown("### Test Webhook")
-            st.markdown("Configure your own webhook for testing:")
-            
-            st.session_state.test_webhook_url = st.text_input(
-                "Your Webhook URL",
-                value=st.session_state.test_webhook_url,
-                type="password",
-                help="Webhook URL from your test private channel"
-            )
-            
-            # Designer webhook mapping section
-            st.markdown("### Designer Webhook Mapping")
-            st.markdown("Map designer names to their channel webhook URLs:")
-            
-            # Allow adding new webhook mappings
-            col1, col2 = st.columns(2)
-            with col1:
-                new_designer = st.text_input("Designer Name", key="new_webhook_designer")
-            with col2:
-                new_webhook = st.text_input("Webhook URL", key="new_webhook_url", type="password")
-            
-            if st.button("Add Webhook Mapping"):
-                if new_designer and new_webhook:
-                    st.session_state.designer_webhook_mapping[new_designer] = new_webhook
-                    st.success(f"Added webhook mapping for {new_designer}")
-                else:
-                    st.error("Please enter both designer name and webhook URL")
-            
-            # Display current mappings and allow removal
-            if st.session_state.designer_webhook_mapping:
-                st.markdown("### Current Webhook Mappings")
-                for idx, (designer, webhook) in enumerate(st.session_state.designer_webhook_mapping.items()):
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        st.text(designer)
-                    with col2:
-                        if st.button("Remove", key=f"remove_webhook_{idx}"):
-                            del st.session_state.designer_webhook_mapping[designer]
-                            st.rerun()
-            
-            # Test button
-            if st.button("Test Webhook"):
-                if st.session_state.test_webhook_url:
-                    # Create test task
-                    test_task = [{
-                        "Project": "Test Project",
-                        "Task": "Test Task",
-                        "Start Time": "09:00",
-                        "End Time": "17:00",
-                        "Allocated Hours": 8.0,
-                        "Days Overdue": 2
-                    }]
-                    
-                    # Send test
-                    success = send_teams_webhook_notification(
-                        "Test User",
-                        st.session_state.test_webhook_url,
-                        test_task,
-                        datetime.now().date()
-                    )
-                    
-                    if success:
-                        st.success("Test message sent to your Teams channel!")
-                    else:
-                        st.error("Failed to send test message. Check the webhook URL.")
-                else:
-                    st.error("Please enter a webhook URL first")
-        render_teams_direct_messaging_ui() 
-        # Connection settings
-        with st.expander("Connection Settings"):
-            odoo_url = st.text_input("Odoo URL", st.session_state.odoo_url)
-            odoo_db = st.text_input("Database", st.session_state.odoo_db)
-            odoo_username = st.text_input("Username", st.session_state.odoo_username)
-            odoo_password = st.text_input("Password", type="password", value=st.session_state.odoo_password)
-            
-            if st.button("Connect"):
-                with st.spinner("Connecting to Odoo..."):
-                    uid, models = authenticate_odoo(odoo_url, odoo_db, odoo_username, odoo_password)
-                    
-                    if uid and models:
-                        st.session_state.odoo_uid = uid
-                        st.session_state.odoo_models = models
-                        st.session_state.odoo_db = odoo_db
-                        st.session_state.odoo_url = odoo_url
-                        st.session_state.odoo_username = odoo_username
-                        st.session_state.odoo_password = odoo_password
-                        st.success("Connected successfully!")
-                    else:
-                        st.error("Failed to connect to Odoo")
-        # Add CSV data status expander right before the Connection Settings expander
-        with st.sidebar.expander("CSV Data Status", expanded=False):
-            if st.session_state.employee_data is not None:
-                st.success(f"✅ Employee data loaded: {len(st.session_state.employee_data)} records")
-                st.text(f"Email mappings: {len(st.session_state.designer_email_mapping)}")
-                st.text(f"Teams ID mappings: {len(st.session_state.designer_teams_id_mapping)}")
-                
-                if st.button("Reload Data"):
-                    st.session_state.employee_data = load_employee_data()
-                    if st.session_state.employee_data is not None:
-                        update_designer_mappings_from_csv()
-                        st.success("Data reloaded successfully")
-                    else:
-                        st.error("Failed to reload data")
-            else:
-                st.error("❌ Employee data not loaded")
-                if st.button("Try Loading Data"):
-                    st.session_state.employee_data = load_employee_data()
-                    if st.session_state.employee_data is not None:
-                        update_designer_mappings_from_csv()
-                        st.success("Data loaded successfully")
-                    else:
-                        st.error("Failed to load data")
-    # Main area content
-    # Connection status
-    if st.session_state.odoo_uid and st.session_state.odoo_models:
-        st.success(f"Connected to Odoo as {st.session_state.odoo_username}")
+        # Admin Tools for 'admin' user
+        if st.session_state.user.get("username") == "admin":
+            st.sidebar.markdown("---")
+            st.sidebar.subheader("Admin Tools")
+            if st.sidebar.button("System Debug Dashboard"):
+                st.session_state.debug_mode = "system_debug"
+                st.rerun()
+            if st.sidebar.button("Auth Debug Dashboard"):
+                st.session_state.debug_mode = "auth_debug"
+                st.rerun()
     else:
-        st.warning("Not connected to Odoo. Please connect using the sidebar.")
-        if st.button("Connect to Odoo"):
-            with st.spinner("Connecting to Odoo..."):
-                uid, models = authenticate_odoo(
-                    st.session_state.odoo_url,
-                    st.session_state.odoo_db,
-                    st.session_state.odoo_username,
-                    st.session_state.odoo_password
-                )
+        st.sidebar.info("Please log in to access navigation.")
+
+    # ─── Quick Debug (always visible) ─────────────────────────────────────
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Quick Debug")
+    
+    if st.sidebar.button("Test Supabase"):
+        # your existing Supabase test code here...
+        pass
+
+    if st.sidebar.button("Test Encryption"):
+        # your existing Encryption test code here...
+        pass
+
+    if st.sidebar.button("Test Odoo Secrets"):
+        for key in ["ODOO_URL", "ODOO_DB", "ODOO_USERNAME", "ODOO_PASSWORD"]:
+            val = get_secret(key)
+            st.sidebar.write(f"**{key}** →", "✅ set" if val else "❌ EMPTY")
+
+    if st.sidebar.button("Test Odoo Connection"):
+        url = get_secret("ODOO_URL") + "/xmlrpc/2/common"
+        try:
+            uid = xmlrpc.client.ServerProxy(url).authenticate(
+                get_secret("ODOO_DB"),
+                get_secret("ODOO_USERNAME"),
+                get_secret("ODOO_PASSWORD"),
+                {}
+            )
+            st.sidebar.success(f"authenticate() → {uid!r}")
+        except Exception as e:
+            st.sidebar.error(f"RPC error: {type(e).__name__}: {e}")
+
+    st.sidebar.markdown("---")
+    st.sidebar.caption("© 2025 Task Management System")
+
+
+def auth_debug_page():
+    """Dashboard for authentication debugging"""
+    st.title("Authentication Debug Dashboard")
+    
+    # Basic Authentication Info
+    st.subheader("Authentication Status")
+    
+    # Display current authentication state
+    auth_state = {
+        "Logged In": st.session_state.get("logged_in", False),
+        "Username": st.session_state.get("user", {}).get("username", "None"),
+        "Gmail Auth Complete": st.session_state.get("gmail_auth_complete", False),
+        "Drive Auth Complete": st.session_state.get("drive_auth_complete", False),
+        "Google Auth Complete": st.session_state.get("google_auth_complete", False),
+        "Gmail Credentials Present": "google_gmail_creds" in st.session_state,
+        "Drive Credentials Present": "google_drive_creds" in st.session_state
+    }
+    
+    for key, value in auth_state.items():
+        st.write(f"**{key}:** {value}")
+
+    # In the auth_debug_page function, add:
+    st.subheader("Token Reset")
+    if st.button("Reset All OAuth Tokens"):
+        from token_storage import reset_user_tokens
+        success = reset_user_tokens()
+        if success:
+            # Also clear local session tokens
+            for key in ["google_gmail_creds", "google_drive_creds", 
+                        "gmail_auth_complete", "drive_auth_complete", 
+                        "google_auth_complete"]:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.success("All tokens reset successfully. Please re-authenticate.")
+        else:
+            st.error("Failed to reset tokens. Check logs for details.")
+    
+    # Supabase Testing
+    st.subheader("Supabase Connection Test")
+    
+    if st.button("Test Supabase Connection"):
+        try:
+            from token_storage import get_supabase_client
+            client = get_supabase_client()
+            if client:
+                try:
+                    response = client.table("oauth_tokens").select("count").limit(1).execute()
+                    st.success("✅ Supabase connection successful")
+                    st.json(response.data)
+                except Exception as e:
+                    st.error(f"❌ Table error: {str(e)}")
+            else:
+                st.error("❌ Supabase client creation failed")
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
+    
+    # Test encryption
+    st.subheader("Encryption Test")
+    
+    if st.button("Test Encryption System"):
+        try:
+            from token_storage import get_encryption_key, encrypt_token, decrypt_token
+            
+            # Get encryption key
+            key = get_encryption_key()
+            if key:
+                st.success(f"✅ Encryption key found (length: {len(key)})")
                 
-                if uid and models:
-                    st.session_state.odoo_uid = uid
-                    st.session_state.odoo_models = models
-                    st.success("Connected successfully!")
+                # Test encryption/decryption
+                import time as time_module  # Add this near your other imports
+                # Then use:
+                test_data = {"test": "data", "time": str(time_module.time())}
+                st.write("Test data:", test_data)
+                
+                encrypted = encrypt_token(test_data)
+                if encrypted:
+                    st.success(f"✅ Encryption successful")
+                    st.text(f"Encrypted data preview: {encrypted[:50]}...")
+                    
+                    decrypted = decrypt_token(encrypted)
+                    if decrypted == test_data:
+                        st.success("✅ Decryption successful")
+                        st.write("Decrypted data:", decrypted)
+                    else:
+                        st.error("❌ Decryption failed or mismatched")
+                        st.write("Decrypted data:", decrypted)
                 else:
-                    st.error("Failed to connect to Odoo")
+                    st.error("❌ Encryption failed")
+            else:
+                st.error("❌ No encryption key found")
+                secrets_keys = list(st.secrets.keys())
+                st.write("Available secret keys:", secrets_keys)
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
+            st.code(traceback.format_exc())
     
-    # Reference date info
-    st.info(f"Date Range: {st.session_state.reference_date} to Selected Date - Showing unlogged hours in this range")
+    # Google Auth Actions
+    st.subheader("Google Authentication Actions")
     
-    # Date selection
-    col1, col2, col3 = st.columns(3)
-    
+    col1, col2 = st.columns(2)
     with col1:
-        selected_date = st.date_input(
-            "Select End Date", 
-            datetime.now().date(),  # Default to yesterday
-            help="Choose the end date for the report range (reference date to this date)"
-        )
+        if st.button("Reset Google Auth State"):
+            keys = ["google_gmail_creds", "google_drive_creds", 
+                    "gmail_auth_complete", "drive_auth_complete", "google_auth_complete"]
+            for key in keys:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.success("Google authentication state reset")
+            st.rerun()
     
     with col2:
-        view_type = st.radio(
-            "Group By", 
-            ["Designer", "Project", "Urgency"],
-            horizontal=True,
-            help="Choose how to organize the report"
-        )
-        
-    with col3:
-        send_email_report = st.checkbox(
-            "Send Email Report", 
-            value=st.session_state.email_enabled,
-            help="Send the report by email after generation"
-        )
+        if st.button("Start Google Auth Process"):
+            st.session_state.show_google_auth = True
+            st.rerun()
     
-    # Generate report button
-    if st.button("Generate Report", type="primary"):
-        if not st.session_state.odoo_uid or not st.session_state.odoo_models:
-            st.error("Not connected to Odoo. Please connect first.")
-        else:
-            # Display shift status filter info
-            if st.session_state.shift_status_filter:
-                shift_label = "Planned (Confirmed)" if st.session_state.shift_status_filter == "Planned" else "Forecasted (Unconfirmed)"
-                st.info(f"Filtering for {shift_label} planning slots")
-            
-            with st.spinner("Generating timesheet report..."):
-                # Generate the report
-                df, missing_count, timesheet_count = generate_missing_timesheet_report(
-                    selected_date, 
-                    st.session_state.shift_status_filter,
-                    send_email_report
-                )
-                
-                # Display results
-                if timesheet_count > 0:
-                    st.info(f"Found {timesheet_count} timesheet entries from {st.session_state.reference_date.strftime('%Y-%m-%d')} to {selected_date.strftime('%Y-%m-%d')}")
-                else:
-                    st.warning(f"No timesheet entries found from {st.session_state.reference_date.strftime('%Y-%m-%d')} to {selected_date.strftime('%Y-%m-%d')}")
-                    
-                if missing_count > 0:
-                    filter_text = ""
-                    if st.session_state.shift_status_filter:
-                        filter_text = f" with shift status '{st.session_state.shift_status_filter}'"
-                    
-                    st.warning(f"Found {missing_count} planning slots{filter_text} without timesheet entries from {st.session_state.reference_date.strftime('%Y-%m-%d')} to {selected_date.strftime('%Y-%m-%d')}")
-                    
-                    if not df.empty:
-                        # Display data based on grouping
-                        if view_type == "Designer":
-                            st.subheader("Planning Slots by Designer")
-                            
-                            designer_summary = df.groupby("Designer").size().reset_index(name="Missing Entries")
-                            designer_summary = designer_summary.sort_values("Missing Entries", ascending=False)
-                            
-                            st.dataframe(designer_summary)
-                            
-                            for designer in designer_summary["Designer"]:
-                                designer_entries = df[df["Designer"] == designer]
-                                with st.expander(f"{designer} - {len(designer_entries)} planning slots"):
-                                    st.dataframe(designer_entries.drop(columns=["Designer"]))
-                        
-                        elif view_type == "Project":
-                            st.subheader("Planning Slots by Project")
-                            
-                            project_summary = df.groupby("Project").size().reset_index(name="Missing Entries")
-                            project_summary = project_summary.sort_values("Missing Entries", ascending=False)
-                            
-                            st.dataframe(project_summary)
-                            
-                            for project in project_summary["Project"]:
-                                project_entries = df[df["Project"] == project]
-                                with st.expander(f"{project} - {len(project_entries)} planning slots"):
-                                    st.dataframe(project_entries.drop(columns=["Project"]))
-                        
-                        elif view_type == "Urgency":
-                            st.subheader("Planning Slots by Urgency")
-                            
-                            # Apply color coding to urgency
-                            def highlight_urgency(s):
-                                if s == 'High':
-                                    return 'background-color: red; color: white'
-                                elif s == 'Medium':
-                                    return 'background-color: orange; color: black'
-                                else:
-                                    return 'background-color: green; color: white'
-                            
-                            urgency_summary = df.groupby("Urgency").size().reset_index(name="Missing Entries")
-                            urgency_order = {'High': 0, 'Medium': 1, 'Low': 2}
-                            urgency_summary['order'] = urgency_summary['Urgency'].map(urgency_order)
-                            urgency_summary = urgency_summary.sort_values("order")
-                            urgency_summary = urgency_summary.drop(columns=["order"])
-                            
-                            st.dataframe(urgency_summary.style.applymap(highlight_urgency, subset=['Urgency']))
-                            
-                            # Display entries for each urgency level
-                            for urgency in ['High', 'Medium', 'Low']:
-                                if urgency in df['Urgency'].values:
-                                    urgency_entries = df[df["Urgency"] == urgency]
-                                    urgency_color = "red" if urgency == "High" else ("orange" if urgency == "Medium" else "green")
-                                    
-                                    with st.expander(f"{urgency} Urgency - {len(urgency_entries)} planning slots", expanded=(urgency == "High")):
-                                        if urgency == "High":
-                                            st.warning("These tasks are 2+ days overdue. Managers will be alerted if not addressed.")
-                                        elif urgency == "Medium":
-                                            st.info("These tasks are 1 day overdue and need immediate attention.")
-                                            
-                                        st.dataframe(urgency_entries)
-                        
-                        # Download button
-                        st.subheader("Download Report")
-                        
-                        csv = df.to_csv(index=False)
-                        st.download_button(
-                            label="Download CSV",
-                            data=csv,
-                            file_name=f"planning_timesheet_report_{st.session_state.reference_date.strftime('%Y-%m-%d')}_to_{selected_date.strftime('%Y-%m-%d')}.csv",
-                            mime="text/csv"
-                        )
-                else:
-                    filter_text = ""
-                    if st.session_state.shift_status_filter:
-                        filter_text = f" (shift status: '{st.session_state.shift_status_filter}')"
-                        
-                    st.success(f"All planning slots{filter_text} have corresponding timesheet entries!")
-                    
-                    if not df.empty and st.session_state.debug_mode:
-                        st.info("Showing all planning slots (debug mode)")
-                        st.dataframe(df)
-                    elif df.empty:
-                        st.warning(f"No planning slots found for this date{filter_text}.")
-            
-            # Show error details if any
-            if st.session_state.last_error and st.session_state.debug_mode:
-                with st.expander("Error Details", expanded=False):
-                    st.code(st.session_state.last_error)
-    
-    # Add a section for scheduled reports
-    st.subheader("Schedule Daily Reports")
-    st.info("""
-    To set up scheduled daily reports, you need to run this app with a scheduled task or cron job.
-    
-    Example command for running a daily report at 9:00 AM:
-    ```
-    streamlit run app.py -- --headless --date=today --email=true
-    ```
-    
-    Add this command to your server's cron jobs or task scheduler.
-    """)
-    # Automatic Scheduling Configuration
-    st.subheader("Automatic Scheduling Configuration")
+    # Add ability to return to normal mode
+    if st.button("Return to Normal Mode"):
+        st.session_state.pop("debug_mode", None)
+        st.rerun()        
+# -------------------------------
+# 1) LOGIN PAGE
+# -------------------------------
 
-    # Container for scheduling settings
-    schedule_container = st.container()
-    with schedule_container:
-        # Initialize session state variables for scheduling if they don't exist
-        if 'auto_scheduling_enabled' not in st.session_state:
-            st.session_state.auto_scheduling_enabled = False
-        if 'auto_schedule_time' not in st.session_state:
-            st.session_state.auto_schedule_time = "09:00"
-        
-        # UI elements for scheduling
-        enable_col, time_col = st.columns([1, 2])
-        
-        with enable_col:
-            auto_scheduling = st.checkbox("Enable Auto-Scheduling", 
-                                        value=st.session_state.auto_scheduling_enabled,
-                                        help="When enabled, the system will attempt to run reports automatically")
-        
-        with time_col:
-            schedule_time = st.time_input("Daily Run Time", 
-                                        value=datetime.strptime(st.session_state.auto_schedule_time, "%H:%M").time(),
-                                        help="Time to run the report daily")
-        
-        # Save settings button
-        if st.button("Save Scheduling Settings"):
-            st.session_state.auto_scheduling_enabled = auto_scheduling
-            st.session_state.auto_schedule_time = schedule_time.strftime("%H:%M")
-            
-            # Use a hardcoded app URL
-            base_url = "https://prezlab-uhd.streamlit.app"
-            schedule_url = f"{base_url}?headless=true&date=today&email=true&designer_emails=true&shift_status=planned"
-            
-            if auto_scheduling:
-                st.success(f"Automatic scheduling enabled! Reports will run daily at {schedule_time.strftime('%H:%M')}.")
-                st.info("Use this URL with an external scheduler service like cron-job.org:")
-                st.code(schedule_url)
-            else:
-                st.warning("Automatic scheduling is disabled.")
-if __name__ == "__main__":
-    # Check if running in headless mode with command-line arguments
-    import sys
-    import argparse
+def login_page():
+    from session_manager import SessionManager
+
+    # Touch the session so we don't expire mid‑login
+    SessionManager.update_activity()
     
-    if len(sys.argv) > 1 and "--headless" in sys.argv:
-        # Parse command-line arguments for headless mode
-        parser = argparse.ArgumentParser(description="Missing Timesheet Reporter")
-        parser.add_argument("--headless", action="store_true", help="Run in headless mode")
-        parser.add_argument("--date", default="today", help="Date for report (YYYY-MM-DD or 'today')")
-        parser.add_argument("--email", action="store_true", help="Send email report")
-        parser.add_argument("--shift-status", default="planned", help="Shift status filter (planned, forecasted, or all)")
-        parser.add_argument("--designer-emails", action="store_true", help="Send individual emails to designers")
-        
-        # Need to filter out Streamlit's own arguments
-        streamlit_args = []
-        our_args = []
-        for arg in sys.argv[1:]:
-            if arg.startswith("--headless") or arg.startswith("--date") or arg.startswith("--email") or arg.startswith("--shift-status"):
-                our_args.append(arg)
-            else:
-                streamlit_args.append(arg)
-                
-        args, _ = parser.parse_known_args(our_args)
-        
-        # Set up date
-        if args.date == "today":
-            report_date = datetime.now().date()
-        else:
-            try:
-                report_date = datetime.strptime(args.date, "%Y-%m-%d").date()
-            except ValueError:
-                logger.error(f"Invalid date format: {args.date}. Using today's date.")
-                report_date = datetime.now().date()
-        
-        # Set shift status filter
-        if args.shift_status.lower() == "all":
-            shift_status_filter = None
-        elif args.shift_status.lower() == "forecasted":
-            shift_status_filter = "Forecasted"
-        else:
-            shift_status_filter = "Planned"  # Default
-        
-        logger.info(f"Running in headless mode for date {report_date}")
-        
-        # Connect to Odoo (using stored credentials)
-        uid, models = authenticate_odoo(
-            st.session_state.odoo_url,
-            st.session_state.odoo_db,
-            st.session_state.odoo_username,
-            st.session_state.odoo_password
-        )
-        
-        if uid and models:
-            st.session_state.odoo_uid = uid
-            st.session_state.odoo_models = models
+    # Add the logo with center positioning for the login page
+    add_logo(position="center", width=200)  # Bigger logo for login page
+
+    # Center the form in the middle column
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.title("Welcome")
+        st.subheader("Login to Task Management System")
+
+        with st.form("login_form"):
+            username = st.text_input("Username", key="username_input")
+            password = st.text_input("Password", type="password", key="password_input")
+            submit = st.form_submit_button("Login")
+
+            if not submit:
+                return
+
+            # 1) Require both fields
+            if not username or not password:
+                st.warning("Please enter both username and password.")
+                return
+
+            # 2) Validate against multiple user credentials
+            authenticated = False
             
-            # Generate report and send email
-            df, missing_count, timesheet_count = generate_missing_timesheet_report(
-                report_date, 
-                shift_status_filter,
-                args.email  # Send email if --email flag is provided
+            # First check the admin user (backward compatibility)
+            valid_admin_user = get_secret("APP_USERNAME", "admin")
+            valid_admin_pass = get_secret("APP_PASSWORD", "password")
+            if username == valid_admin_user and password == valid_admin_pass:
+                authenticated = True
+            
+            # Check additional users
+            for prefix in ["USER_karmel", "USER_abdelrauof"]:
+                user = get_secret(f"{prefix}_USERNAME")
+                pwd = get_secret(f"{prefix}_PASSWORD")
+                if username == user and password == pwd:
+                    authenticated = True
+                    break
+            
+            if not authenticated:
+                st.error("Invalid credentials. Please try again.")
+                return
+
+            # 3) Log into Streamlit session
+            SessionManager.login(username, expiry_hours=8)
+
+            # 4) Attempt Odoo authentication exactly once
+            try:
+                with st.spinner("Connecting to Odoo…"):
+                    uid, models = get_odoo_connection(force_refresh=True)
+
+                if not uid:
+                    # Explicit error if Odoo.authenticate returned False
+                    raise RuntimeError("authenticate() returned False")
+
+                # Success path
+                st.success("Login successful!")
+                st.rerun()
+
+            except Exception as e:
+                # Show full error, log stack trace, and rollback Streamlit login
+                st.error(f"Odoo authentication failed: {type(e).__name__}: {e}")
+                logger.exception("Odoo login error")
+                SessionManager.logout()
+                return
+
+
+# -------------------------------
+# 2) REQUEST TYPE SELECTION PAGE
+# -------------------------------
+def type_selection_page():
+    st.title("Task Management Dashboard")
+    
+    # User greeting
+    st.markdown(f"### Welcome, {st.session_state.user['username']}!")
+    st.markdown("Select the type of request you want to create.")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        with st.container(border=True):
+            st.subheader("Via Sales Order")
+            st.markdown("For one-time projects or framework tasks with subtasks.")
+            if st.button("Create Ad-hoc Request", use_container_width=True):
+                st.session_state.form_type = "Via Sales Order"
+                st.rerun()
+    
+    with col2:
+        with st.container(border=True):
+            st.subheader("Via Project")
+            st.markdown("For ongoing projects with recurring tasks.")
+            if st.button("Create Retainer Request", use_container_width=True):
+                st.session_state.form_type = "Via Project"
+                st.rerun()
+                
+    # Recent activities section
+    with st.expander("Recent Activities", expanded=False):
+        st.markdown("This section will show recent task activities.")
+        # Here you could display recent tasks from Odoo
+
+# -------------------------------
+# HELPER: Fetch Sales Order Lines
+# -------------------------------
+def get_sales_order_lines(models, uid, sales_order_name):
+    try:
+        so_data = models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            'sale.order', 'search_read',
+            [[['name', '=', sales_order_name]]],
+            {'fields': ['order_line']}
+        )
+        if not so_data:
+            return []
+        order_line_ids = so_data[0].get('order_line', [])
+        if not order_line_ids:
+            return []
+        lines = models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,  # Fixed: Using constants instead of os.getenv
+            'sale.order.line', 'read',
+            [order_line_ids],
+            {'fields': ['id', 'name']}
+        )
+        return lines
+    except Exception as e:
+        logger.error(f"Error fetching sales order lines: {e}")
+        st.error(f"Error fetching sales order lines. Please try again.")
+        return []
+
+# -------------------------------
+# 3A) SALES ORDER PAGE (Ad-hoc Step 1)
+# -------------------------------
+def sales_order_page():
+    st.title("Via Sales Order: Select Sales Order")
+    
+    # Progress bar
+    st.progress(50, text="Step 2 of 4: Select Sales Order")
+    
+    # Navigation
+    cols = st.columns([1, 5])
+    with cols[0]:
+        if st.button("← Back"):
+            # Set a flag to indicate we're returning to parent (don't clear the form data)
+            st.session_state.pop("company_selection_done", None)
+            st.rerun()
+    
+    # Display selected company
+    with st.container(border=True):
+        selected_company = st.session_state.get("selected_company", "")
+        st.markdown(f"**Selected Company:** {selected_company}")
+    
+    # Add this code to detect company changes and force refresh
+    if "last_company_for_sales_orders" in st.session_state:
+        if st.session_state.last_company_for_sales_orders != selected_company:
+            # Company changed, force refresh sales orders
+            st.session_state.refresh_sales_orders = True
+            
+    # Update the tracked company
+    st.session_state.last_company_for_sales_orders = selected_company
+
+    # Connect to Odoo
+    if "odoo_uid" not in st.session_state or "odoo_models" not in st.session_state:
+        with st.spinner("Connecting to Odoo..."):
+            uid, models = authenticate_odoo()
+            if uid and models:
+                st.session_state.odoo_uid = uid
+                st.session_state.odoo_models = models
+            else:
+                st.error("Failed to connect to Odoo. Please check your credentials.")
+                return
+    else:
+        uid = st.session_state.odoo_uid
+        models = st.session_state.odoo_models
+
+    # Fetch sales orders filtered by company if not already in session
+    if "sales_orders" not in st.session_state or st.session_state.get("refresh_sales_orders", False):
+        with st.spinner("Fetching sales orders..."):
+            orders = get_sales_orders(models, uid, selected_company)
+            if orders:
+                st.session_state.sales_orders = orders
+                st.session_state.refresh_sales_orders = False
+            else:
+                st.warning(f"No sales orders found for {selected_company} or error fetching orders.")
+                st.session_state.sales_orders = []
+
+    # Create form for sales order selection
+    with st.form("sales_order_form"):
+        st.subheader("Select Sales Order")
+        
+        sales_order_options = [order['name'] for order in st.session_state.sales_orders]
+        selected_sales_order = st.selectbox(
+            "Sales Order Number",
+            ["(Manual Entry)"] + sales_order_options
+        )
+
+        # We're not showing these fields anymore, but we need placeholder 
+        # variables that will hold the values later
+        parent_sales_order_item = None
+        customer = None
+        project = None
+
+        submit = st.form_submit_button("Next")
+        
+        if submit:
+            # If a sales order is selected, get the details from Odoo
+            if selected_sales_order != "(Manual Entry)":
+                details = get_sales_order_details(models, uid, selected_sales_order)
+                parent_sales_order_item = details.get('sales_order', selected_sales_order)
+                customer = details.get('customer', "")
+                project = details.get('project', "")
+                
+                # For automatic sales order selection, we use the order name itself if no item specified
+                if not parent_sales_order_item:
+                    parent_sales_order_item = selected_sales_order
+            else:
+                # For manual entry, we use the selected_sales_order as the item name
+                # This removes the validation problem since we're not showing the fields to fill
+                parent_sales_order_item = "Manual Entry"
+                customer = "Manual Customer"
+                project = "Manual Project"
+            
+            # Save to session state
+            st.session_state.parent_sales_order_item = parent_sales_order_item
+            st.session_state.customer = customer
+            st.session_state.project = project
+            
+            # Get sales order lines for selected order
+            if selected_sales_order != "(Manual Entry)":
+                with st.spinner("Fetching sales order lines..."):
+                    so_lines = get_sales_order_lines(models, uid, selected_sales_order)
+            else:
+                so_lines = []
+                
+            st.session_state.so_items = so_lines
+            st.session_state.subtask_index = 0
+            st.session_state.adhoc_subtasks = []
+            st.session_state.adhoc_sales_order_done = True
+            st.success("Sales order information saved. Proceeding to parent task details.")
+            st.rerun()
+
+# -------------------------------
+# 3B) AD-HOC PARENT TASK PAGE (Ad-hoc Step 2)
+# -------------------------------
+def adhoc_parent_task_page():
+    st.title("Via Sales Order: Parent Task")
+    
+    # Progress bar
+    st.progress(80, text="Step 4 of 5: Parent Task Details")
+    
+    # Clear the return flag if it exists
+    st.session_state.pop("returning_to_parent", False) if "returning_to_parent" in st.session_state else None
+
+    # Navigation
+    cols = st.columns([1, 5])
+    with cols[0]:
+        if st.button("← Back"):
+            st.session_state.pop("adhoc_sales_order_done", None)
+            st.rerun()
+
+    # Display current selection
+    with st.container(border=True):
+        selected_company = st.session_state.get("selected_company", "")
+        parent_sales_order_item = st.session_state.get("parent_sales_order_item", "")
+        customer = st.session_state.get("customer", "")
+        project = st.session_state.get("project", "")
+        
+        st.markdown("### Current Selection")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.markdown(f"**Company:** {selected_company}")
+        with col2:
+            st.markdown(f"**Sales Order:** {parent_sales_order_item}")
+        with col3:
+            st.markdown(f"**Customer:** {customer}")
+        with col4:
+            st.markdown(f"**Project:** {project}")
+    
+    uid = st.session_state.odoo_uid
+    models = st.session_state.odoo_models
+
+    # Get email analysis results if available
+    email_analysis = st.session_state.get("email_analysis", {})
+    email_analysis_skipped = st.session_state.get("email_analysis_skipped", True)
+
+    # Form for parent task details
+    with st.form("parent_task_form"):
+        st.subheader("Parent Task Details")
+        
+        # Basic Information
+        with st.container():
+            # Use email analysis results as default values if available
+            default_title = ""
+            if email_analysis and isinstance(email_analysis, dict) and not email_analysis_skipped:
+                services = email_analysis.get("services", "")
+                if services:
+                    default_title = f"Task for {services}"
+            
+            parent_task_title = st.text_input("Parent Task Title", 
+                                             value=default_title,
+                                             help="Enter a descriptive title for the parent task")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                target_language_options = get_target_languages_odoo(models, uid)
+                # Default target language from email analysis
+                default_target_lang_idx = 0
+                if email_analysis and isinstance(email_analysis, dict) and not email_analysis_skipped:
+                    target_lang = email_analysis.get("target_language", "")
+                    if target_lang and target_language_options:
+                        for i, lang in enumerate(target_language_options):
+                            if target_lang.lower() in lang.lower():
+                                default_target_lang_idx = i
+                                break
+                
+                target_language_parent = st.selectbox(
+                    "Target Language", 
+                    target_language_options if target_language_options else [""],
+                    index=default_target_lang_idx,
+                    help="Select the target language for this task"
+                )
+
+            with col2:
+                client_success_exec_options = get_client_success_executives_odoo(models, uid)
+                if client_success_exec_options:
+                    exec_options = [(user['id'], user['name']) for user in client_success_exec_options]
+                    client_success_executive = st.selectbox(
+                        "Client Success Executive", 
+                        options=exec_options, 
+                        format_func=lambda x: x[1],
+                        help="Select the responsible client success executive"
+                    )
+                else:
+                    client_success_executive = st.text_input("Client Success Executive")
+        
+        # Guidelines
+        with st.expander("Guidelines", expanded=False):
+            guidelines_options = get_guidelines_odoo(models, uid)
+            if guidelines_options:
+                # Use format_func to display the name while storing the tuple
+                guidelines_parent = st.selectbox(
+                    "Guidelines", 
+                    options=guidelines_options,
+                    format_func=lambda x: x[1]  # Display the name part
+                )
+            else:
+                st.error("No guidelines found. This field is required.")
+                guidelines_parent = None
+        # Dates
+        st.subheader("Task Timeline")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            request_receipt_date = st.date_input("Request Receipt Date", value=date.today())
+            request_receipt_time = st.time_input("Request Receipt Time", value=datetime.now().time())
+        with col2:
+            client_due_date_parent = st.date_input("Client Due Date", value=date.today() + pd.Timedelta(days=7))
+        with col3:
+            internal_due_date = st.date_input("Internal Due Date", value=date.today() + pd.Timedelta(days=5))
+        
+        # Combine date and time
+        request_receipt_dt = datetime.combine(request_receipt_date, request_receipt_time)
+        
+        # Description
+        st.subheader("Description")
+        
+        # Use requirements from email analysis as starting point for description
+        default_description = ""
+        if email_analysis and isinstance(email_analysis, dict) and not email_analysis_skipped:
+            requirements = email_analysis.get("requirements", "")
+            if requirements:
+                default_description = f"Requirements from client email:\n{requirements}"
+                
+                # Add other relevant information
+                services = email_analysis.get("services", "")
+                if services:
+                    default_description += f"\n\nRequested Services: {services}"
+                    
+                deadline = email_analysis.get("deadline", "")
+                if deadline:
+                    default_description += f"\n\nClient Requested Deadline: {deadline}"
+        
+        parent_description = st.text_area("Task Description", 
+                                         value=default_description,
+                                         height=150, 
+                                         help="Enter any additional details for this task")
+        # Submit button
+        submit = st.form_submit_button("Next: Add Subtasks")
+        
+        if submit:
+            # Validate inputs
+            if not parent_task_title:
+                st.error("Please enter a parent task title.")
+                return
+                
+            # Save to session state
+            st.session_state.adhoc_parent_task_title = parent_task_title
+            st.session_state.adhoc_target_language = target_language_parent
+            st.session_state.adhoc_guidelines = guidelines_parent
+            st.session_state.adhoc_client_success_exec = client_success_executive
+            st.session_state.adhoc_request_receipt_dt = request_receipt_dt
+            st.session_state.adhoc_client_due_date_parent = client_due_date_parent
+            st.session_state.adhoc_internal_due_date = internal_due_date
+            st.session_state.adhoc_parent_description = parent_description
+            st.session_state.adhoc_parent_input_done = True
+            
+            st.success("Parent task details saved. Proceeding to subtasks.")
+            st.rerun()
+
+# -------------------------------
+# 3C) AD-HOC SUBTASK PAGE (Ad-hoc Step 3)
+# -------------------------------
+def adhoc_subtask_page():
+    st.title("Via Sales Order: Subtasks")
+    
+    # Progress bar
+    st.progress(100, text="Step 5 of 5: Subtask Details")
+    
+    # Navigation
+    cols = st.columns([1, 5])
+    with cols[0]:
+        if st.button("← Back"):
+            st.session_state.pop("adhoc_parent_input_done", None)
+            st.rerun()
+
+    uid = st.session_state.odoo_uid
+    models = st.session_state.odoo_models
+
+    # Get parent task information
+    parent_data = {
+        "selected_company": st.session_state.get("selected_company", ""),
+        "parent_sales_order_item": st.session_state.get("parent_sales_order_item", ""),
+        "parent_task_title": st.session_state.get("adhoc_parent_task_title", ""),
+        "customer": st.session_state.get("customer", ""),
+        "project": st.session_state.get("project", ""),
+        "target_language_parent": st.session_state.get("adhoc_target_language", ""),
+        "guidelines_parent": st.session_state.get("adhoc_guidelines", ""),
+        "client_success_executive": st.session_state.get("adhoc_client_success_exec", ""),
+        "request_receipt_dt": st.session_state.get("adhoc_request_receipt_dt", datetime.now()),
+        "client_due_date_parent": st.session_state.get("adhoc_client_due_date_parent", date.today()),
+        "internal_due_date": st.session_state.get("adhoc_internal_due_date", date.today()),
+        "parent_description": st.session_state.get("adhoc_parent_description", "")
+    }
+    
+    # Display parent task summary
+    with st.expander("Parent Task Summary", expanded=False):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown(f"**Company:** {parent_data['selected_company']}")
+            st.markdown(f"**Parent Task:** {parent_data['parent_task_title']}")
+            st.markdown(f"**Sales Order:** {parent_data['parent_sales_order_item']}")
+            st.markdown(f"**Customer:** {parent_data['customer']}")
+            st.markdown(f"**Project:** {parent_data['project']}")
+            st.markdown(f"**Target Language:** {parent_data['target_language_parent']}")
+        with col2:
+            st.markdown(f"**Client Success Executive:** {parent_data['client_success_executive'][1] if isinstance(parent_data['client_success_executive'], tuple) else parent_data['client_success_executive']}")
+            st.markdown(f"**Request Receipt:** {parent_data['request_receipt_dt'].strftime('%Y-%m-%d %H:%M')}")
+            st.markdown(f"**Client Due Date:** {parent_data['client_due_date_parent']}")
+            st.markdown(f"**Internal Due Date:** {parent_data['internal_due_date']}")
+        
+        st.markdown(f"**Description:** {parent_data['parent_description']}")
+
+    # Rest of the function remains the same...
+    
+    # Get current subtask index and sales order items list
+    idx = st.session_state.get("subtask_index", 0)
+    so_items = st.session_state.get("so_items", [])
+    
+    # Display subtasks in progress
+    if st.session_state.adhoc_subtasks:
+        with st.container(border=True):
+            st.subheader("Subtasks Added")
+            for i, task in enumerate(st.session_state.adhoc_subtasks):
+                st.markdown(f"**Subtask {i+1}:** {task['subtask_title']} (Due: {task['client_due_date_subtask']})")
+    
+    # Check if we have more subtasks to add
+    if idx >= len(so_items):
+        st.warning("No more sales order items available for subtasks.")
+        
+        # Allow adding a custom subtask if needed
+        with st.expander("Add Custom Subtask", expanded=True):
+            with st.form("custom_subtask_form"):
+                custom_subtask_title = st.text_input("Custom Subtask Title")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    service_category_1_options = get_service_category_1_options(models, uid)
+                    service_category_1 = st.selectbox(
+                        "Service Category 1", 
+                        [opt[1] if isinstance(opt, list) and len(opt) > 1 else opt for opt in service_category_1_options] if service_category_1_options else [""]
+                    )
+                    no_of_design_units_sc1 = st.number_input("Total No. of Design Units (SC1)", min_value=0, step=1)
+                
+                with col2:
+                    service_category_2_options = get_service_category_2_options(models, uid)
+                    service_category_2 = st.selectbox(
+                        "Service Category 2", 
+                        [opt[1] if isinstance(opt, list) and len(opt) > 1 else opt for opt in service_category_2_options] if service_category_2_options else [""]
+                    )
+                    no_of_design_units_sc2 = st.number_input("Total No. of Design Units (SC2)", min_value=0, step=1)
+                
+                client_due_date_subtask = st.date_input("Client Due Date (Subtask)", value=date.today() + pd.Timedelta(days=5))
+                
+                add_custom = st.form_submit_button("Add Custom Subtask")
+                
+                if add_custom:
+                    if not custom_subtask_title:
+                        st.error("Please enter a subtask title.")
+                        return
+                        
+                    new_subtask = {
+                        "line_id": None,
+                        "line_name": "Custom",
+                        "subtask_title": custom_subtask_title,
+                        "service_category_1": service_category_1,
+                        "no_of_design_units_sc1": no_of_design_units_sc1,
+                        "service_category_2": service_category_2,
+                        "no_of_design_units_sc2": no_of_design_units_sc2,
+                        "client_due_date_subtask": str(client_due_date_subtask)
+                    }
+                    st.session_state.adhoc_subtasks.append(new_subtask)
+                    st.success(f"Added custom subtask: {custom_subtask_title}")
+                    st.rerun()
+        
+        # Show submission button
+        if st.button("Submit All Tasks", use_container_width=True, type="primary"):
+            with st.spinner("Creating tasks in Odoo..."):
+                finalize_adhoc_subtasks()
+        
+        return
+    
+    # Get email analysis results if available
+    email_analysis = st.session_state.get("email_analysis", {})
+    email_analysis_skipped = st.session_state.get("email_analysis_skipped", True)
+
+    # Current sales order line for this subtask
+    current_line = so_items[idx]
+    line_name = current_line.get("name", f"Line #{idx+1}")
+    
+    # Subtask form
+    # Current sales order line for this subtask
+    current_line = so_items[idx] if idx < len(so_items) else {}
+    line_name = current_line.get("name", f"Line #{idx+1}") if current_line else f"Subtask #{idx+1}"
+    
+    # Subtask form
+    with st.form(f"subtask_form_{idx}"):
+        st.subheader(f"Subtask for Sales Order Line: {line_name}")
+        
+        # Default title from services in email analysis
+        default_title = f"Subtask for {line_name}"
+        if email_analysis and isinstance(email_analysis, dict) and not email_analysis_skipped and idx == 0:  # Only use for first subtask
+            services = email_analysis.get("services", "")
+            if services:
+                default_title = f"Subtask: {services}"
+                
+        subtask_title = st.text_input("Subtask Title", value=default_title)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            service_category_1_options = get_service_category_1_options(models, uid)
+            if service_category_1_options:
+                service_category_1 = st.selectbox(
+                    "Service Category 1", 
+                    options=service_category_1_options,
+                    format_func=lambda x: x[1] if isinstance(x, tuple) and len(x) > 1 else str(x)
+                )
+            else:
+                # Fallback to text input with warning
+                st.warning("No service categories found. Manual entry not recommended.")
+                service_category_1_text = st.text_input("Service Category 1 (manual)")
+                # Create a dummy tuple with -1 as ID to indicate this is not a valid ID
+                service_category_1 = (-1, service_category_1_text) if service_category_1_text else None
+            
+            no_of_design_units_sc1 = st.number_input("Total No. of Design Units (SC1)", min_value=0, step=1)
+
+        with col2:
+            service_category_2_options = get_service_category_2_options(models, uid)
+            if service_category_2_options:
+                service_category_2 = st.selectbox(
+                    "Service Category 2", 
+                    options=service_category_2_options,
+                    format_func=lambda x: x[1] if isinstance(x, tuple) and len(x) > 1 else str(x)
+                )
+            else:
+                # Fallback to text input with warning
+                st.warning("No service categories found. Manual entry not recommended.")
+                service_category_2_text = st.text_input("Service Category 2 (manual)")
+                # Create a dummy tuple with -1 as ID to indicate this is not a valid ID
+                service_category_2 = (-1, service_category_2_text) if service_category_2_text else None
+            
+            no_of_design_units_sc2 = st.number_input("Total No. of Design Units (SC2)", min_value=0, step=1)
+
+        
+        client_due_date_subtask = st.date_input("Client Due Date (Subtask)", value=date.today() + pd.Timedelta(days=5))
+        
+        # Submit options
+        col1, col2 = st.columns(2)
+        with col1:
+            next_subtask = st.form_submit_button("Save & Next Subtask")
+        with col2:
+            if idx == len(so_items) - 1:
+                finish_all = st.form_submit_button("Finish & Submit All")
+            else:
+                finish_all = False
+        
+        if next_subtask or finish_all:
+            # Validate input
+            if not subtask_title:
+                st.error("Please enter a subtask title.")
+                return
+                
+            # Create new subtask
+            new_subtask = {
+                "line_id": current_line.get("id"),
+                "line_name": line_name,
+                "subtask_title": subtask_title,
+                "service_category_1": service_category_1,
+                "no_of_design_units_sc1": no_of_design_units_sc1,
+                "service_category_2": service_category_2,
+                "no_of_design_units_sc2": no_of_design_units_sc2,
+                "client_due_date_subtask": str(client_due_date_subtask)
+            }
+            
+            # Add to session state
+            st.session_state.adhoc_subtasks.append(new_subtask)
+            st.session_state.subtask_index = idx + 1
+            
+            # If finishing, submit all; otherwise, continue to next subtask
+            if finish_all:
+                with st.spinner("Creating tasks in Odoo..."):
+                    finalize_adhoc_subtasks()
+            else:
+                st.success(f"Subtask saved: {subtask_title}")
+                st.rerun()
+
+# -------------------------------
+# Finalize: Create Parent Task & Subtasks in Odoo
+# -------------------------------
+def finalize_adhoc_subtasks():
+    from session_manager import SessionManager
+    SessionManager.update_activity()
+    
+    # Import modules only when needed
+    from google_drive import create_folder_structure
+    uid = st.session_state.odoo_uid
+    models = st.session_state.odoo_models
+
+    # Get parent task data
+    selected_company = st.session_state.get("selected_company", "")
+    parent_sales_order_item = st.session_state.get("parent_sales_order_item", "")
+    parent_task_title = st.session_state.get("adhoc_parent_task_title", "")
+    customer = st.session_state.get("customer", "")
+    project_name = st.session_state.get("project", "")
+    target_language_parent = st.session_state.get("adhoc_target_language", "")
+    guidelines_parent = st.session_state.get("adhoc_guidelines", "")
+    client_success_executive = st.session_state.get("adhoc_client_success_exec", "")
+    request_receipt_dt = st.session_state.get("adhoc_request_receipt_dt", datetime.now())
+    client_due_date_parent = st.session_state.get("adhoc_client_due_date_parent", date.today())
+    internal_due_date = st.session_state.get("adhoc_internal_due_date", date.today())
+    parent_description = st.session_state.get("adhoc_parent_description", "")
+
+    try:
+        # Get project ID
+        project_id = get_project_id_by_name(models, uid, project_name)
+        if not project_id:
+            st.error(f"Could not find project with name: {project_name}")
+            return
+            
+        # Ensure project_id is integer
+        if not isinstance(project_id, int):
+            try:
+                project_id = int(project_id)
+            except (ValueError, TypeError) as e:
+                st.error(f"Invalid project ID format: {e}")
+                logger.error(f"Invalid project ID format: {project_id}, error: {e}")
+                return
+        
+        # Handle user ID
+        user_id = client_success_executive[0] if isinstance(client_success_executive, tuple) else client_success_executive
+        if not isinstance(user_id, int):
+            try:
+                user_id = int(user_id)
+            except (ValueError, TypeError) as e:
+                st.error(f"Invalid user ID format: {e}")
+                logger.error(f"Invalid user ID format: {user_id}, error: {e}")
+                return
+        
+        # Handle guidelines_id - make sure it's an integer
+        guidelines_id = guidelines_parent[0] if isinstance(guidelines_parent, tuple) else None
+        
+        # Create parent task with only fields that exist
+        parent_task_data = {
+            "name": f"Ad-hoc Parent: {parent_task_title}",
+            "project_id": project_id,
+            "user_ids": [(6, 0, [user_id])],  # This is the correct format for many2many fields
+            "description": f"Company: {selected_company}\nSales Order Item: {parent_sales_order_item}\nCustomer: {customer}\nProject: {project_name}\n{parent_description}"
+        }
+        
+        # Add optional fields if they exist and have values
+        if target_language_parent:
+            parent_task_data["x_studio_target_language"] = target_language_parent
+            
+        if guidelines_id:
+            parent_task_data["x_studio_guidelines"] = guidelines_id
+        
+        # Format dates correctly to avoid the microseconds issue
+        if request_receipt_dt:
+            parent_task_data["x_studio_request_receipt_date_time"] = request_receipt_dt.strftime("%Y-%m-%d %H:%M:%S")
+            
+        if client_due_date_parent:
+            parent_task_data["x_studio_client_due_date_3"] = client_due_date_parent.strftime("%Y-%m-%d")
+            
+        if internal_due_date:
+            parent_task_data["x_studio_internal_due_date_1"] = internal_due_date.strftime("%Y-%m-%d")
+        
+        # Create parent task in Odoo
+        parent_task_id = create_odoo_task(parent_task_data)
+        if not parent_task_id:
+            st.error("Failed to create parent task in Odoo.")
+            return
+            
+        st.success(f"Created Parent Task in Odoo (ID: {parent_task_id})")
+        
+        # Create Google Drive folder structure for this parent task
+        with st.spinner("Creating Google Drive folder structure for task..."):
+            # Sanitize folder name (replace characters not allowed in file names)
+            folder_name = f"{parent_task_title} - {parent_task_id}"
+            folder_name = folder_name.replace('/', '-').replace('\\', '-')
+            
+            # Create folder structure with subfolders
+            from google_drive import create_folder_structure
+            folder_structure = create_folder_structure(
+                folder_name, 
+                subfolders=["MATERIAL", "DELIVERABLE"]
             )
             
-            logger.info(f"Report generated: {missing_count} missing entries out of {len(df)} total planning slots")
-        else:
-            logger.error("Failed to connect to Odoo in headless mode")
+            if folder_structure:
+                # Store main folder info in session state
+                st.session_state.drive_folder_id = folder_structure['main_folder_id']
+                st.session_state.drive_folder_link = folder_structure['main_folder_link']
+                st.session_state.folder_structure = folder_structure
+                
+                # Update the parent task with the folder links
+                try:
+                    # Create a nicely formatted description with folder links
+                    updated_description = f"{parent_description}\n\n"
+                    updated_description += f"📁 **Google Drive Folders:**\n"
+                    updated_description += f"- Main Folder: {folder_structure['main_folder_url']}\n"
+                    
+                    # Add subfolder links if available
+                    for subfolder_name, subfolder_info in folder_structure['subfolders'].items():
+                        updated_description += f"- {subfolder_name}: {subfolder_info['url']}\n"
+                    
+                    models.execute_kw(
+                        ODOO_DB, uid, ODOO_PASSWORD,
+                        'project.task', 'write',
+                        [[parent_task_id], {'description': updated_description}]
+                    )
+                    logger.info(f"Updated task {parent_task_id} with Drive folder structure links")
+                except Exception as e:
+                    logger.warning(f"Could not update task with folder links: {e}")
+                    
+                st.success(f"Created folder structure with MATERIAL and DELIVERABLE subfolders")
+            else:
+                st.warning("Could not create Google Drive folder. Please check logs for details.")
+        # Create subtasks
+        subtasks = st.session_state.adhoc_subtasks
+        created_subtasks = []
         
-        # Exit after generating report in headless mode
-        sys.exit(0)
+        for i, sub in enumerate(subtasks):
+            # Create base subtask data
+            subtask_data = {
+                "name": f"Ad-hoc Subtask: {sub['subtask_title']}",
+                "project_id": project_id,
+                "user_ids": [(6, 0, [user_id])],
+                "description": f"Company: {selected_company}\nSubtask for Sales Order Line: {sub['line_name']}",
+                # Set the parent-child relationship - use parent_id, not x_studio_sub_task_1
+                "parent_id": parent_task_id
+            }
+            
+            # Add optional fields if they exist and have values
+            if target_language_parent:
+                subtask_data["x_studio_target_language"] = target_language_parent
+                
+            if guidelines_id:
+                subtask_data["x_studio_guidelines"] = guidelines_id
+            
+            # Format dates correctly
+            if request_receipt_dt:
+                subtask_data["x_studio_request_receipt_date_time"] = request_receipt_dt.strftime("%Y-%m-%d %H:%M:%S")
+                
+            # Use the subtask-specific due date
+            if "client_due_date_subtask" in sub and sub["client_due_date_subtask"]:
+                # Parse the date from string if needed
+                if isinstance(sub["client_due_date_subtask"], str):
+                    due_date = datetime.strptime(sub["client_due_date_subtask"], "%Y-%m-%d").date()
+                else:
+                    due_date = sub["client_due_date_subtask"]
+                subtask_data["x_studio_client_due_date_3"] = due_date.strftime("%Y-%m-%d")
+                
+            if internal_due_date:
+                subtask_data["x_studio_internal_due_date_1"] = internal_due_date.strftime("%Y-%m-%d")
+            
+            # Add service categories if they exist
+            if "service_category_1" in sub and sub["service_category_1"]:
+                # If service_category_1 is a tuple with ID and name, use the ID
+                if isinstance(sub["service_category_1"], tuple) and len(sub["service_category_1"]) > 1:
+                    # Only use the ID if it's valid (not -1)
+                    if sub["service_category_1"][0] != -1:
+                        subtask_data["x_studio_service_category_1"] = sub["service_category_1"][0]
+                    else:
+                        logger.warning(f"Skipping invalid service_category_1 ID: {sub['service_category_1']}")
+                # If it's already an ID, use it directly
+                elif isinstance(sub["service_category_1"], int):
+                    subtask_data["x_studio_service_category_1"] = sub["service_category_1"]
+                else:
+                    logger.warning(f"Skipping service_category_1 as it's not in the expected format: {sub['service_category_1']}")
+
+            # Similar handling for service_category_2
+            if "service_category_2" in sub and sub["service_category_2"]:
+                if isinstance(sub["service_category_2"], tuple) and len(sub["service_category_2"]) > 1:
+                    # Only use the ID if it's valid (not -1)
+                    if sub["service_category_2"][0] != -1:
+                        subtask_data["x_studio_service_category_2"] = sub["service_category_2"][0]
+                    else:
+                        logger.warning(f"Skipping invalid service_category_2 ID: {sub['service_category_2']}")
+                elif isinstance(sub["service_category_2"], int):
+                    subtask_data["x_studio_service_category_2"] = sub["service_category_2"]
+                else:
+                    logger.warning(f"Skipping service_category_2 as it's not in the expected format: {sub['service_category_2']}")
+            
+            # Add design units if applicable
+            if "no_of_design_units_sc1" in sub and sub["no_of_design_units_sc1"]:
+                subtask_data["x_studio_total_no_of_design_units_sc1"] = sub["no_of_design_units_sc1"]
+            
+            if "no_of_design_units_sc2" in sub and sub["no_of_design_units_sc2"]:
+                subtask_data["x_studio_total_no_of_design_units_sc2"] = sub["no_of_design_units_sc2"]
+            
+            # Create subtask in Odoo
+            subtask_id = create_odoo_task(subtask_data)
+            if subtask_id:
+                created_subtasks.append(subtask_id)
+                st.success(f"Created Subtask {i+1} in Odoo (ID: {subtask_id})")
+            else:
+                st.error(f"Failed to create subtask {i+1} in Odoo.")
+        
+        # After tasks are created successfully
+        if created_subtasks:
+            st.success(f"Successfully created {len(created_subtasks)} subtasks!")
+            
+            # Store created tasks and parent task ID in session state for designer selection
+            created_tasks = []
+            for subtask_id in created_subtasks:
+                # Fetch the task details from Odoo
+                task_details = models.execute_kw(
+                    ODOO_DB, uid, ODOO_PASSWORD,
+                    'project.task', 'read',
+                    [[subtask_id]],
+                    {'fields': ['id', 'name', 'description', 'x_studio_service_category_1', 
+                            'x_studio_service_category_2', 'x_studio_target_language',
+                            'x_studio_client_due_date_3', 'date_deadline']}
+                )[0]
+                created_tasks.append(task_details)
+            
+            # Store in session state
+            st.session_state.created_tasks = created_tasks
+            st.session_state.parent_task_id = parent_task_id
+            st.session_state.designer_selection = True
+            
+            # Summary container
+            with st.container(border=True):
+                st.subheader("Task Creation Summary")
+                st.markdown(f"**Parent Task:** {parent_task_title} (ID: {parent_task_id})")
+                st.markdown(f"**Subtasks Created:** {len(created_subtasks)}")
+                st.markdown(f"**Company:** {selected_company}")
+                st.markdown(f"**Project:** {project_name}")
+                st.markdown(f"**Client:** {customer}")
+                
+                
+                if 'drive_folder_id' in st.session_state and 'drive_folder_link' in st.session_state:
+                    st.markdown(f"**📁 Main Folder:** [Open Folder]({st.session_state.drive_folder_link})")
+                    
+                    # If we have subfolder information, display those links too
+                    if 'folder_structure' in st.session_state and 'subfolders' in st.session_state.folder_structure:
+                        for subfolder_name, subfolder_info in st.session_state.folder_structure['subfolders'].items():
+                            st.markdown(f"**📁 {subfolder_name}:** [Open Folder]({subfolder_info['link']})")
+
+
+                # Display a message to help user understand what's happening
+                st.info("Click the button below to proceed to designer selection, or you can view the task details in Odoo.")
+                st.session_state.designer_selection = True  # This flag is already being checked elsewhere
+                st.rerun()
+
+
+
+    except Exception as e:
+        st.error(f"An error occurred: {str(e)}")
+        logger.error(f"Error in finalize_adhoc_subtasks: {e}", exc_info=True)
+
+# -------------------------------
+# RETAINER FLOW
+# -------------------------------
+def retainer_parent_task_page():
+    st.title("Via Project: Parent Task")
     
-    # Normal mode - run the Streamlit app
+    # Progress bar
+    st.progress(80, text="Step 3 of 4: Parent Task Details")
+    
+    # Navigation
+    cols = st.columns([1, 5])
+    with cols[0]:
+        if st.button("← Back"):
+            st.session_state.returning_to_company = True
+            st.rerun()
+            
+    # Display selected company
+    with st.container(border=True):
+        selected_company = st.session_state.get("selected_company", "")
+        st.markdown(f"**Selected Company:** {selected_company}")
+    
+    # Connect to Odoo if not already connected
+    if "odoo_uid" not in st.session_state or "odoo_models" not in st.session_state:
+        with st.spinner("Connecting to Odoo..."):
+            uid, models = authenticate_odoo()
+            if uid and models:
+                st.session_state.odoo_uid = uid
+                st.session_state.odoo_models = models
+            else:
+                st.error("Failed to connect to Odoo. Please check your credentials.")
+                return
+    else:
+        uid = st.session_state.odoo_uid
+        models = st.session_state.odoo_models
+
+    # Form for retainer parent task
+    with st.form("retainer_parent_form"):
+        st.subheader("Retainer Project Fields")
+        
+        # Project and customer selection
+        col1, col2 = st.columns(2)
+        with col1:
+            retainer_project_options = get_retainer_projects(models, uid, selected_company)
+            if retainer_project_options:
+                parent_project = st.selectbox("Project", retainer_project_options)
+            else:
+                parent_project = st.text_input("Project")
+        
+        with col2:
+            retainer_customer_options = get_retainer_customers(models, uid)
+            if retainer_customer_options:
+                retainer_customer = st.selectbox("Customer", retainer_customer_options)
+            else:
+                retainer_customer = st.text_input("Customer")
+        
+        parent_task_title = st.text_input("Parent Task Title")
+        
+        # Language and executive
+        col1, col2 = st.columns(2)
+        with col1:
+            target_language_options = get_target_languages_odoo(models, uid)
+            if target_language_options:
+                retainer_target_language = st.selectbox("Target Language", target_language_options)
+            else:
+                retainer_target_language = st.text_input("Target Language")
+        
+        with col2:
+            client_success_exec_options = get_client_success_executives_odoo(models, uid)
+            if client_success_exec_options:
+                exec_options = [(user['id'], user['name']) for user in client_success_exec_options]
+                retainer_client_success_exec = st.selectbox("Client Success Executive", exec_options, format_func=lambda x: x[1])
+            else:
+                retainer_client_success_exec = st.text_input("Client Success Executive")
+        
+        # Guidelines
+        with st.expander("Guidelines", expanded=False):
+            guidelines_options = get_guidelines_odoo(models, uid)
+            if guidelines_options:
+                # Use format_func to display only the name while storing the tuple
+                retainer_guidelines = st.selectbox(
+                    "Guidelines", 
+                    options=guidelines_options,
+                    format_func=lambda x: x[1]  # Display the name part
+                )
+            else:
+                retainer_guidelines = st.text_area("Guidelines", height=100)
+        
+        # Dates
+        st.subheader("Dates (Retainer Parent Task)")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            retainer_request_receipt_date = st.date_input("Request Receipt Date", value=date.today())
+            retainer_request_receipt_time = st.time_input("Request Receipt Time", value=datetime.now().time())
+        
+        with col2:
+            retainer_internal_due_date = st.date_input("Internal Due Date", value=date.today() + pd.Timedelta(days=5))
+            retainer_internal_due_time = st.time_input("Internal Due Time", value=time(17, 0))  # 5:00 PM default
+        
+        # Combine date and time
+        retainer_request_receipt_dt = datetime.combine(retainer_request_receipt_date, retainer_request_receipt_time)
+        retainer_internal_dt = datetime.combine(retainer_internal_due_date, retainer_internal_due_time)
+        
+        # Submit button
+        submit = st.form_submit_button("Next: Add Subtask")
+        
+        if submit:
+            # Validate input
+            if not parent_project or not parent_task_title or not retainer_customer:
+                st.error("Please fill in all required fields.")
+                return
+                
+            # Save to session state
+            st.session_state.retainer_project = parent_project
+            st.session_state.retainer_parent_task_title = parent_task_title
+            st.session_state.retainer_customer = retainer_customer
+            st.session_state.retainer_target_language = retainer_target_language
+            st.session_state.retainer_guidelines = retainer_guidelines
+            st.session_state.retainer_client_success_exec = retainer_client_success_exec
+            st.session_state.retainer_request_receipt_dt = retainer_request_receipt_dt
+            st.session_state.retainer_internal_dt = retainer_internal_dt
+            st.session_state.retainer_parent_input_done = True
+            
+            st.success("Parent task details saved. Proceeding to subtask.")
+            st.rerun()
+
+def retainer_subtask_page():
+    st.title("Via Project: Subtask")
+    
+    # Progress bar
+    st.progress(100, text="Step 4 of 4: Subtask Details")
+    
+    # Navigation
+    cols = st.columns([1, 5])
+    with cols[0]:
+        if st.button("← Back"):
+            st.session_state.pop("retainer_parent_input_done", None)
+            st.rerun()
+
+    uid = st.session_state.odoo_uid
+    models = st.session_state.odoo_models
+
+    # Get parent task information
+    selected_company = st.session_state.get("selected_company", "")
+    parent_project_name = st.session_state.get("retainer_project", "")
+    parent_task_title = st.session_state.get("retainer_parent_task_title", "")
+    retainer_customer = st.session_state.get("retainer_customer", "")
+    retainer_target_language = st.session_state.get("retainer_target_language", "")
+    retainer_guidelines = st.session_state.get("retainer_guidelines", "")
+    retainer_client_success_exec = st.session_state.get("retainer_client_success_exec", "")
+    retainer_request_receipt_dt = st.session_state.get("retainer_request_receipt_dt", datetime.now())
+    retainer_internal_dt = st.session_state.get("retainer_internal_dt", datetime.now())
+
+    # Display parent task summary
+    with st.container(border=True):
+        st.subheader("Parent Task Summary")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown(f"**Company:** {selected_company}")
+            st.markdown(f"**Project:** {parent_project_name}")
+            st.markdown(f"**Parent Task:** {parent_task_title}")
+            st.markdown(f"**Customer:** {retainer_customer}")
+        with col2:
+            st.markdown(f"**Target Language:** {retainer_target_language}")
+            st.markdown(f"**Request Receipt:** {retainer_request_receipt_dt.strftime('%Y-%m-%d %H:%M')}")
+            st.markdown(f"**Internal Due Date:** {retainer_internal_dt.strftime('%Y-%m-%d %H:%M')}")
+
+    # Subtask form
+    with st.form("retainer_subtask_form"):
+        st.subheader("Subtask Details")
+        
+        subtask_title = st.text_input("Subtask Title")
+        
+        # Service categories
+        col1, col2 = st.columns(2)
+        with col1:
+            service_category_1_options = get_service_category_1_options(models, uid)
+            if service_category_1_options:
+                retainer_service_category_1 = st.selectbox(
+                    "Service Category 1", 
+                    options=service_category_1_options,
+                    format_func=lambda x: x[1] if isinstance(x, tuple) and len(x) > 1 else str(x)
+                )
+            else:
+                retainer_service_category_1 = st.text_input("Service Category 1")
+            
+            no_of_design_units_sc1 = st.number_input("No. of Design Units SC1", min_value=0, step=1)
+        
+        with col2:
+            service_category_2_options = get_service_category_2_options(models, uid)
+            if service_category_2_options:
+                retainer_service_category_2 = st.selectbox(
+                    "Service Category 2", 
+                    options=service_category_2_options,
+                    format_func=lambda x: x[1] if isinstance(x, tuple) and len(x) > 1 else str(x)
+                )
+            else:
+                retainer_service_category_2 = st.text_input("Service Category 2")
+            
+            no_of_design_units_sc2 = st.number_input("No. of Design Units SC2", min_value=0, step=1)
+        
+        # Due date
+        retainer_client_due_date_subtask = st.date_input("Client Due Date (Subtask)")
+        
+        # Designer suggestion and submit buttons
+        col1, col2 = st.columns(2)
+
+        with col2:
+            submit_request = st.form_submit_button("Submit Request")
+        
+        
+        # SUBMIT BUTTON HANDLER - Replace the existing submit_request button handler
+        if submit_request:
+            # Validate inputs
+            if not subtask_title:
+                st.error("Please enter a subtask title.")
+                return
+                
+            # Get project ID
+            project_id = get_project_id_by_name(models, uid, parent_project_name)
+            if not project_id:
+                st.error(f"Could not find a project with name: {parent_project_name}")
+                return
+                
+            # Ensure project_id is integer
+            if not isinstance(project_id, int):
+                try:
+                    project_id = int(project_id)
+                except (ValueError, TypeError) as e:
+                    st.error(f"Invalid project ID format: {e}")
+                    logger.error(f"Invalid project ID format: {project_id}, error: {e}")
+                    return
+            
+            # Handle user ID
+            user_id = retainer_client_success_exec[0] if isinstance(retainer_client_success_exec, tuple) else retainer_client_success_exec
+            if not isinstance(user_id, int):
+                try:
+                    user_id = int(user_id)
+                except (ValueError, TypeError) as e:
+                    st.error(f"Invalid user ID format: {e}")
+                    logger.error(f"Invalid user ID format: {user_id}, error: {e}")
+                    return
+            
+            # Find partner_id for customer if available
+            partner_id = None
+            try:
+                partners = models.execute_kw(
+                    ODOO_DB, uid, ODOO_PASSWORD,
+                    'res.partner', 'search_read',
+                    [[['name', '=', retainer_customer]]],
+                    {'fields': ['id']}
+                )
+                if partners:
+                    partner_id = partners[0]['id']
+                    logger.info(f"Found partner_id {partner_id} for customer {retainer_customer}")
+            except Exception as e:
+                logger.warning(f"Could not find partner_id for customer {retainer_customer}: {e}")
+            
+            try:
+                # STEP 1: CREATE PARENT TASK
+                with st.spinner("Creating parent task in Odoo..."):
+                    # Create parent task with only fields that exist
+                    parent_task_data = {
+                        "name": f"Retainer Parent: {parent_project_name} - {retainer_customer}",
+                        "project_id": project_id,
+                        "user_ids": [(6, 0, [user_id])],  # This is the correct format for many2many fields
+                        "description": f"Company: {selected_company}\nCustomer: {retainer_customer}\nProject: {parent_project_name}"
+                    }
+                    
+                    # Add partner_id if found
+                    if partner_id:
+                        parent_task_data["partner_id"] = partner_id
+                    
+                    # Add optional fields if they exist and have values
+                    if retainer_target_language:
+                        parent_task_data["x_studio_target_language"] = retainer_target_language
+                    
+                    # Handle guidelines properly - extract ID from tuple if applicable
+                    if retainer_guidelines:
+                        if isinstance(retainer_guidelines, tuple) and len(retainer_guidelines) > 1:
+                            # Extract the ID (first element of the tuple)
+                            parent_task_data["x_studio_guidelines"] = retainer_guidelines[0]
+                        elif isinstance(retainer_guidelines, int):
+                            parent_task_data["x_studio_guidelines"] = retainer_guidelines
+                        else:
+                            logger.warning(f"Guidelines not in expected format: {retainer_guidelines}")
+                    
+                    # Format dates correctly to avoid the microseconds issue
+                    if retainer_request_receipt_dt:
+                        parent_task_data["x_studio_request_receipt_date_time"] = retainer_request_receipt_dt.strftime("%Y-%m-%d %H:%M:%S")
+                        
+                    if retainer_internal_dt:
+                        parent_task_data["x_studio_internal_due_date_1"] = retainer_internal_dt.strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    # Create parent task in Odoo
+                    parent_task_id = create_odoo_task(parent_task_data)
+                    if not parent_task_id:
+                        st.error("Failed to create parent task in Odoo.")
+                        return
+                        
+                    st.success(f"Created Parent Task in Odoo (ID: {parent_task_id})")
+                
+                # STEP 2: CREATE SUBTASK
+                with st.spinner("Creating subtask in Odoo..."):
+                    # Create subtask with parent_id reference
+                    subtask_data = {
+                        "name": f"Retainer Subtask: {subtask_title}",
+                        "project_id": project_id,
+                        "parent_id": parent_task_id,  # This establishes the parent-child relationship
+                        "user_ids": [(6, 0, [user_id])],
+                        "description": f"Company: {selected_company}\nCustomer: {retainer_customer}\nProject: {parent_project_name}\nSubtask: {subtask_title}"
+                    }
+                    
+                    # Add partner_id if found
+                    if partner_id:
+                        subtask_data["partner_id"] = partner_id
+                    
+                    # Add optional fields if they exist
+                    if retainer_target_language:
+                        subtask_data["x_studio_target_language"] = retainer_target_language
+                    
+                    # Handle guidelines properly - extract ID from tuple if applicable
+                    if retainer_guidelines:
+                        if isinstance(retainer_guidelines, tuple) and len(retainer_guidelines) > 1:
+                            subtask_data["x_studio_guidelines"] = retainer_guidelines[0]
+                        elif isinstance(retainer_guidelines, int):
+                            subtask_data["x_studio_guidelines"] = retainer_guidelines
+                    
+                    # Format dates correctly
+                    if retainer_request_receipt_dt:
+                        subtask_data["x_studio_request_receipt_date_time"] = retainer_request_receipt_dt.strftime("%Y-%m-%d %H:%M:%S")
+                        
+                    if retainer_client_due_date_subtask:
+                        subtask_data["x_studio_client_due_date_3"] = retainer_client_due_date_subtask.strftime("%Y-%m-%d")
+                        
+                    if retainer_internal_dt:
+                        subtask_data["x_studio_internal_due_date_1"] = retainer_internal_dt.strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    # Handle service category 1
+                    if retainer_service_category_1:
+                        if isinstance(retainer_service_category_1, tuple) and len(retainer_service_category_1) > 1:
+                            if retainer_service_category_1[0] != -1:
+                                subtask_data["x_studio_service_category_1"] = retainer_service_category_1[0]
+                            else:
+                                logger.warning(f"Skipping invalid service_category_1 ID: {retainer_service_category_1}")
+                        elif isinstance(retainer_service_category_1, int):
+                            subtask_data["x_studio_service_category_1"] = retainer_service_category_1
+                        else:
+                            logger.warning(f"Skipping service_category_1 as it's not in expected format: {retainer_service_category_1}")
+                    
+                    # Handle service category 2
+                    if retainer_service_category_2:
+                        if isinstance(retainer_service_category_2, tuple) and len(retainer_service_category_2) > 1:
+                            if retainer_service_category_2[0] != -1:
+                                subtask_data["x_studio_service_category_2"] = retainer_service_category_2[0]
+                            else:
+                                logger.warning(f"Skipping invalid service_category_2 ID: {retainer_service_category_2}")
+                        elif isinstance(retainer_service_category_2, int):
+                            subtask_data["x_studio_service_category_2"] = retainer_service_category_2
+                        else:
+                            logger.warning(f"Skipping service_category_2 as it's not in expected format: {retainer_service_category_2}")
+                    
+                    # Add design units
+                    if no_of_design_units_sc1:
+                        subtask_data["x_studio_total_no_of_design_units_sc1"] = no_of_design_units_sc1
+                    
+                    if no_of_design_units_sc2:
+                        subtask_data["x_studio_total_no_of_design_units_sc2"] = no_of_design_units_sc2
+                    
+                    # Create subtask in Odoo
+                    subtask_id = create_odoo_task(subtask_data)
+                    if not subtask_id:
+                        st.error("Failed to create subtask in Odoo.")
+                        return
+                        
+                    st.success(f"Created Subtask in Odoo (ID: {subtask_id})")
+                
+                # STEP 3: CREATE GOOGLE DRIVE FOLDER STRUCTURE
+                with st.spinner("Creating Google Drive folder structure for task..."):
+                    # Sanitize folder name
+                    folder_name = f"{parent_project_name} - {subtask_title} - {subtask_id}"
+                    folder_name = folder_name.replace('/', '-').replace('\\', '-')
+                    
+                    # Create folder structure with subfolders
+                    from google_drive import create_folder_structure
+                    folder_structure = create_folder_structure(
+                        folder_name, 
+                        subfolders=["MATERIAL", "DELIVERABLE"]
+                    )
+                    
+                    if folder_structure:
+                        # Store main folder info in session state
+                        st.session_state.drive_folder_id = folder_structure['main_folder_id']
+                        st.session_state.drive_folder_link = folder_structure['main_folder_link']
+                        st.session_state.folder_structure = folder_structure
+                        # Update both parent and subtask with the folder links
+                        try:
+                            # Create a nicely formatted description with folder links
+                            folder_description = f"\n\n📁 **Google Drive Folders:**\n"
+                            folder_description += f"- Main Folder: {folder_structure['main_folder_url']}\n"
+                            
+                            # Add subfolder links if available
+                            for subfolder_name, subfolder_info in folder_structure['subfolders'].items():
+                                folder_description += f"- {subfolder_name}: {subfolder_info['url']}\n"
+                            
+                            # Update parent task description
+                            parent_task_desc = models.execute_kw(
+                                ODOO_DB, uid, ODOO_PASSWORD,
+                                'project.task', 'read',
+                                [[parent_task_id]],
+                                {'fields': ['description']}
+                            )[0]['description']
+                            
+                            updated_parent_desc = f"{parent_task_desc}{folder_description}"
+                            
+                            models.execute_kw(
+                                ODOO_DB, uid, ODOO_PASSWORD,
+                                'project.task', 'write',
+                                [[parent_task_id], {'description': updated_parent_desc}]
+                            )
+                            
+                            # Update subtask description
+                            subtask_desc = models.execute_kw(
+                                ODOO_DB, uid, ODOO_PASSWORD,
+                                'project.task', 'read',
+                                [[subtask_id]],
+                                {'fields': ['description']}
+                            )[0]['description']
+                            
+                            updated_subtask_desc = f"{subtask_desc}{folder_description}"
+                            
+                            models.execute_kw(
+                                ODOO_DB, uid, ODOO_PASSWORD,
+                                'project.task', 'write',
+                                [[subtask_id], {'description': updated_subtask_desc}]
+                            )
+                            
+                            logger.info(f"Updated tasks with Drive folder structure links")
+                            st.success(f"Created folder structure with MATERIAL and DELIVERABLE subfolders")
+                        except Exception as e:
+                            logger.warning(f"Could not update tasks with folder links: {e}")
+                    else:
+                        st.warning("Could not create Google Drive folder. Please check logs for details.")
+                
+                # STEP 4: PREPARE FOR DESIGNER SELECTION
+                with st.spinner("Preparing for designer selection..."):
+                    # Fetch the task details from Odoo for designer selection
+                    task_details = models.execute_kw(
+                        ODOO_DB, uid, ODOO_PASSWORD,
+                        'project.task', 'read',
+                        [[subtask_id]],
+                        {'fields': ['id', 'name', 'description', 'x_studio_service_category_1', 
+                                'x_studio_service_category_2', 'x_studio_target_language',
+                                'x_studio_client_due_date_3', 'date_deadline']}
+                    )[0]
+                    
+                    # Store in session state
+                    st.session_state.created_tasks = [task_details]
+                    st.session_state.customer = retainer_customer
+                    st.session_state.project = parent_project_name
+                    st.session_state.parent_task_id = parent_task_id
+                    st.session_state.designer_selection = True
+                    
+                    # Display designer suggestion if available
+                    if "selected_designer" in st.session_state:
+                        st.info(f"Suggested Designer: {st.session_state.selected_designer}")
+                    
+                    # Success message and transition
+                    st.success("Tasks created successfully! Proceeding to designer selection...")
+                    
+                    st.rerun()
+            
+            except Exception as e:
+                st.error(f"An error occurred: {str(e)}")
+                logger.error(f"Error in retainer task creation: {e}", exc_info=True)
+def inspect_field_values(models, uid, field_name, model_name='project.task', limit=50):
+    """
+    Inspects the values of a specific field across records to help diagnose type issues.
+    
+    Args:
+        models: Odoo models proxy
+        uid: User ID
+        field_name: Name of the field to inspect
+        model_name: Name of the model to inspect
+        limit: Maximum number of records to fetch
+        
+    Returns:
+        Analysis of the field values
+    """
+    try:
+        # First, get field information
+        field_info = models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            model_name, 'fields_get',
+            [[field_name]],
+            {'attributes': ['string', 'type', 'relation', 'required', 'selection']}
+        )
+        
+        if not field_info or field_name not in field_info:
+            return f"Field '{field_name}' not found in model '{model_name}'."
+            
+        field_details = field_info[field_name]
+        field_type = field_details.get('type', 'unknown')
+        field_relation = field_details.get('relation', 'none')
+        field_required = field_details.get('required', False)
+        field_selection = field_details.get('selection', [])
+        
+        # Fetch records that have this field populated
+        records = models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            model_name, 'search_read',
+            [[[(field_name, '!=', False)]]],
+            {'fields': ['id', field_name, 'name'], 'limit': limit}
+        )
+        
+        if not records:
+            return (
+                f"No records found with field '{field_name}' populated.\n"
+                f"Field type: {field_type}\n"
+                f"Relation model: {field_relation}\n"
+                f"Required: {field_required}\n"
+                f"Selection options: {field_selection}"
+            )
+            
+        # Analyze the field values
+        types_seen = {}
+        sample_values = {}
+        
+        for rec in records:
+            value = rec.get(field_name)
+            value_type = type(value).__name__
+            
+            if value_type not in types_seen:
+                types_seen[value_type] = 0
+                sample_values[value_type] = []
+                
+            types_seen[value_type] += 1
+            
+            # Store a few sample values of each type
+            if len(sample_values[value_type]) < 3:
+                sample_values[value_type].append((rec.get('id'), rec.get('name', 'No Name'), value))
+        
+        # Generate report
+        report = f"Field '{field_name}' Analysis (from {len(records)} records):\n\n"
+        report += f"Field type in Odoo: {field_type}\n"
+        report += f"Relation model: {field_relation}\n"
+        report += f"Required: {field_required}\n"
+        
+        if field_selection:
+            report += "Selection options:\n"
+            for option in field_selection:
+                report += f"  - {option}\n"
+        
+        report += "\nValue types found in database:\n"
+        
+        for t, count in types_seen.items():
+            report += f"Type: {t} ({count} records)\n"
+            report += "Sample values:\n"
+            
+            for record_id, record_name, sample in sample_values[t]:
+                # Format the sample value for better readability
+                if isinstance(sample, list):
+                    sample_str = f"[{sample}]"
+                else:
+                    sample_str = str(sample)
+                    
+                report += f"  - ID {record_id} ({record_name}): {sample_str}\n"
+                
+            report += "\n"
+            
+        # If it's a relation field, provide some examples of how to use it
+        if field_type in ['many2one', 'one2many', 'many2many']:
+            report += f"\nThis is a {field_type} relation field. Here's how to use it:\n"
+            
+            if field_type == 'many2one':
+                report += "For many2one fields, set the ID of the related record:\n"
+                report += f"  task_data['{field_name}'] = 123  # ID of the related {field_relation} record\n"
+            elif field_type == 'many2many':
+                report += "For many2many fields, use a special command format:\n"
+                report += f"  task_data['{field_name}'] = [(6, 0, [123, 456])]  # Replace with these IDs\n"
+                report += f"  task_data['{field_name}'] = [(4, 123, 0)]  # Add this ID\n"
+            elif field_type == 'one2many':
+                report += "For one2many fields, use a special command format:\n"
+                report += f"  task_data['{field_name}'] = [(0, 0, {{'field': 'value'}})]  # Create and link a new record\n"
+                report += f"  task_data['{field_name}'] = [(1, 123, {{'field': 'value'}})]  # Update linked record with ID 123\n"
+                
+        return report
+        
+    except Exception as e:
+        return f"Error inspecting field: {str(e)}"
+    
+def debug_task_fields():
+    """
+    Debug function to display all available fields on the project.task model
+    """
+    st.subheader("Debug: Task Fields")
+    
+    uid = st.session_state.odoo_uid
+    models = st.session_state.odoo_models
+    
+    if not uid or not models:
+        st.error("Not connected to Odoo. Please log in first.")
+        return
+    
+    # Add a field inspection section
+    st.subheader("Field Value Inspector")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        field_to_inspect = st.text_input("Enter field name to inspect:", value="x_studio_service_category_1")
+    with col2:
+        model_name = st.text_input("Model name:", value="project.task")
+    
+    if st.button("Inspect Field Values"):
+        with st.spinner("Analyzing field values..."):
+            report = inspect_field_values(models, uid, field_to_inspect, model_name)
+            st.text_area("Field Analysis", report, height=400)
+    
+    # Add quick buttons for common problematic fields
+    st.subheader("Quick Field Inspection")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("Inspect Service Category 1"):
+            with st.spinner("Analyzing service category 1..."):
+                report = inspect_field_values(models, uid, "x_studio_service_category_1")
+                st.text_area("Service Category 1 Analysis", report, height=400)
+    
+    with col2:
+        if st.button("Inspect Service Category 2"):
+            with st.spinner("Analyzing service category 2..."):
+                report = inspect_field_values(models, uid, "x_studio_service_category_2")
+                st.text_area("Service Category 2 Analysis", report, height=400)
+    
+    with col3:
+        if st.button("Inspect User IDs"):
+            with st.spinner("Analyzing user_ids field..."):
+                report = inspect_field_values(models, uid, "user_ids")
+                st.text_area("User IDs Analysis", report, height=400)
+                
+    # Model discovery - helps find the actual models for related fields
+    st.subheader("Model Discovery")
+    
+    model_prefix = st.text_input("Search for models with prefix:", value="x_")
+    
+    if st.button("Search Models"):
+        with st.spinner("Searching models..."):
+            try:
+                # This gets all models in Odoo
+                model_records = models.execute_kw(
+                    ODOO_DB, uid, ODOO_PASSWORD,
+                    'ir.model', 'search_read',
+                    [[['model', 'like', model_prefix]]],
+                    {'fields': ['id', 'model', 'name']}
+                )
+                
+                if model_records:
+                    st.success(f"Found {len(model_records)} models matching '{model_prefix}'")
+                    
+                    # Display in a table
+                    model_data = []
+                    for rec in model_records:
+                        model_data.append({
+                            "ID": rec.get('id'),
+                            "Model": rec.get('model'),
+                            "Name": rec.get('name')
+                        })
+                    
+                    st.table(pd.DataFrame(model_data))
+                else:
+                    st.warning(f"No models found matching '{model_prefix}'")
+            except Exception as e:
+                st.error(f"Error searching models: {str(e)}")
+    # Import needed constants
+    from helpers import ODOO_DB, ODOO_PASSWORD
+    
+    try:
+        with st.spinner("Fetching project.task fields..."):
+            fields = models.execute_kw(
+                ODOO_DB, uid, ODOO_PASSWORD,
+                'project.task', 'fields_get',
+                [],
+                {'attributes': ['string', 'type', 'required', 'relation']}
+            )
+        
+        st.success(f"Found {len(fields)} fields on project.task")
+        
+        # Group fields by type for better display
+        field_types = {}
+        for field_name, field_info in fields.items():
+            field_type = field_info.get('type', 'unknown')
+            if field_type not in field_types:
+                field_types[field_type] = []
+            field_types[field_type].append((field_name, field_info))
+        
+        # Display fields by type
+        for field_type, type_fields in field_types.items():
+            with st.expander(f"{field_type.upper()} Fields ({len(type_fields)})"):
+                for field_name, field_info in sorted(type_fields, key=lambda x: x[0]):
+                    # Format the display of field information
+                    field_label = field_info.get('string', 'No Label')
+                    required = field_info.get('required', False)
+                    relation = field_info.get('relation', 'None')
+                    
+                    # Highlight studio fields
+                    if field_name.startswith('x_'):
+                        st.markdown(f"**Field**: `{field_name}` - **Label**: {field_label}")
+                        st.markdown(f"**Required**: {required} - **Relation**: {relation}")
+                        st.markdown("---")
+                    else:
+                        st.markdown(f"Field: `{field_name}` - Label: {field_label}")
+                        st.markdown(f"Required: {required} - Relation: {relation}")
+                        st.markdown("---")
+    
+    except Exception as e:
+        st.error(f"Error fetching field information: {str(e)}")
+        logger.error(f"Error in debug_task_fields: {e}", exc_info=True)
+
+def company_selection_page():
+    st.title("Select Company")
+    
+    # Progress bar
+    st.progress(25, text="Step 1 of 4: Select Company")
+
+    # Connect to Odoo
+    if "odoo_uid" not in st.session_state or "odoo_models" not in st.session_state:
+        with st.spinner("Connecting to Odoo..."):
+            uid, models = authenticate_odoo()
+            if uid and models:
+                st.session_state.odoo_uid = uid
+                st.session_state.odoo_models = models
+            else:
+                st.error("Failed to connect to Odoo. Please check your credentials.")
+                return
+    else:
+        uid = st.session_state.odoo_uid
+        models = st.session_state.odoo_models
+
+    # Fetch companies if not already in session
+    if "companies" not in st.session_state:
+        with st.spinner("Fetching companies..."):
+            companies = get_companies(models, uid)
+            if companies:
+                st.session_state.companies = companies
+            else:
+                st.warning("No companies found or error fetching companies.")
+                st.session_state.companies = []
+
+    # Create form for company selection
+    with st.form("company_selection_form"):
+        st.subheader("Select Company")
+        
+        company_options = st.session_state.companies
+        selected_company = st.selectbox(
+            "Company",
+            company_options
+        )
+
+        submit = st.form_submit_button("Next")
+        
+        if submit:
+            # Validate selection
+            if not selected_company:
+                st.error("Please select a company.")
+                return
+                
+            # Save to session state
+            st.session_state.selected_company = selected_company
+            st.session_state.company_selection_done = True
+            
+            st.success(f"Selected company: {selected_company}")
+            st.rerun()
+
+def email_analysis_page():
+    st.title("Email Analysis")
+    
+    # Progress bar
+    st.progress(66, text="Step 3 of 5: Email Analysis")
+    
+    # Navigation
+    cols = st.columns([1, 5])
+    with cols[0]:
+        if st.button("← Back"):
+            st.session_state["back_requested"] = True
+            st.rerun()
+
+    # Display current selection
+    with st.container(border=True):
+        selected_company = st.session_state.get("selected_company", "")
+        parent_sales_order_item = st.session_state.get("parent_sales_order_item", "")
+        customer = st.session_state.get("customer", "")
+        project = st.session_state.get("project", "")
+        
+        st.markdown("### Current Selection")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.markdown(f"**Company:** {selected_company}")
+        with col2:
+            st.markdown(f"**Sales Order:** {parent_sales_order_item}")
+        with col3:
+            st.markdown(f"**Customer:** {customer}")
+        with col4:
+            st.markdown(f"**Project:** {project}")
+    
+    # Suggested search terms OUTSIDE the form
+    if parent_sales_order_item or customer:
+        st.write("Suggested search terms:")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if parent_sales_order_item and st.button(f"Order: {parent_sales_order_item}", key="so_btn"):
+                st.session_state.search_query = parent_sales_order_item
+                st.rerun()
+        with col2:
+            if customer and st.button(f"Customer: {customer}", key="cust_btn"):
+                st.session_state.search_query = customer
+                st.rerun()
+        with col3:
+            if st.button("Recent emails", key="recent_btn"):
+                st.session_state.search_query = ""
+                st.rerun()
+    
+    # SKIP OPTION - always available outside any form
+    if st.button("Skip Email Analysis", key="skip_outside"):
+        st.session_state.email_analysis_done = True
+        st.session_state.email_analysis_skipped = True
+        st.rerun()
+    
+    # Check for Gmail authentication status BEFORE any forms
+    gmail_authenticated = "google_gmail_creds" in st.session_state
+    
+    if not gmail_authenticated:
+        # Authentication UI - completely outside of any form
+        st.info("### Google Authentication Required")
+        st.markdown("[Click here to authenticate with Google Gmail](https://prezlab-tms.streamlit.app/)")
+        st.warning("You need to authenticate with Gmail before analyzing emails")
+        return  # Exit the function early - don't show any forms
+    
+    # Only proceed with email fetching if already authenticated
+    # Email Analysis Options Form
+    with st.form("email_analysis_options"):
+        st.subheader("Email Analysis Options")
+        
+        # Checkbox to enable/disable email analysis
+        use_email_analysis = st.checkbox("Use Email Analysis to Enhance Task Details", value=True)
+        
+        # Group emails checkbox
+        show_threads = st.checkbox("Group emails by conversation thread", value=True)
+        
+        if use_email_analysis:
+            # Free text search - use session state value if set
+            default_search = st.session_state.get("search_query", "")
+            search_query = st.text_input("Search for emails (subject, sender, or content):",
+                               value=default_search,
+                               help="Type any keywords to find relevant emails")
+            
+            # Number of emails to fetch
+            email_limit = st.slider("Number of emails to fetch", min_value=5, max_value=100, value=50)
+        
+        # Form submit button
+        fetch_emails = st.form_submit_button("Fetch Emails")
+    
+    # Handle form submission OUTSIDE the form
+    if fetch_emails and use_email_analysis:
+        with st.spinner("Connecting to Gmail..."):
+            try:
+                # Gmail service initialization now happens outside any form
+                gmail_service = get_gmail_service()
+                
+                if gmail_service:
+                    with st.spinner(f"Fetching up to {email_limit} emails..."):
+                        recent_emails = fetch_recent_emails(gmail_service, total_emails=email_limit, query=search_query)
+                        
+                        if show_threads:
+                            from gmail_integration import extract_email_threads
+                            threads = extract_email_threads(recent_emails)
+                            st.session_state.email_threads = threads
+                        
+                        st.session_state.recent_emails = recent_emails
+                        st.session_state.show_threads = show_threads
+                        st.rerun()  # Refresh to show results
+                else:
+                    st.error("Failed to connect to Gmail. Please check your credentials.")
+            except Exception as e:
+                st.error(f"Error connecting to Gmail: {str(e)}")
+    
+    # Display emails or threads if fetched
+    if "recent_emails" in st.session_state:
+        if st.session_state.get("show_threads", False) and "email_threads" in st.session_state:
+            # Display threads
+            threads = st.session_state.email_threads
+            thread_count = len(threads)
+            
+            if thread_count > 0:
+                st.success(f"Found {thread_count} email threads")
+                
+                # Create a searchable dropdown
+                thread_options = []
+                thread_ids = list(threads.keys())
+                
+                for thread_id in thread_ids:
+                    thread_emails = threads[thread_id]
+                    # Use the most recent email in thread for display
+                    latest_email = thread_emails[0] if thread_emails else {"from": "Unknown", "subject": "No Subject"}
+                    option_text = f"{latest_email.get('from', 'Unknown')} - {latest_email.get('subject', 'No Subject')}"
+                    thread_options.append(option_text)
+                
+                # Free text search for threads
+                thread_search = st.text_input("Search within found threads:", 
+                                     help="Type to filter the thread list below")
+                
+                # Filter the thread options based on search
+                filtered_thread_options = []
+                filtered_thread_indices = []
+                
+                for i, option in enumerate(thread_options):
+                    if not thread_search or thread_search.lower() in option.lower():
+                        filtered_thread_options.append(option)
+                        filtered_thread_indices.append(i)
+                
+                if filtered_thread_options:
+                    selected_option = st.selectbox(
+                        "Select Thread to Analyze:",
+                        options=range(len(filtered_thread_options)),
+                        format_func=lambda i: filtered_thread_options[i]
+                    )
+                    
+                    # Get the actual thread index
+                    selected_thread_idx = filtered_thread_indices[selected_option]
+                    selected_thread_id = thread_ids[selected_thread_idx]
+                    selected_thread = threads[selected_thread_id]
+                
+                    # Show the thread content
+                    # For threaded emails (replace the existing code)
+                    with st.expander("View Thread Content", expanded=True):
+                        for i, email in enumerate(selected_thread):
+                            st.markdown(f"### Email {i+1}")
+                            st.markdown(f"**From:** {email.get('from', 'Unknown')}")
+                            st.markdown(f"**Subject:** {email.get('subject', 'No Subject')}")
+                            st.markdown(f"**Date:** {email.get('date', 'Unknown')}")
+                            
+                            # Show email content
+                            body = email.get('body', '')
+                            if len(body) > 200:
+                                st.markdown(f"**Content Preview:**\n{body[:200]}...")
+                                # Replace nested expander with checkbox
+                                show_full = st.checkbox(f"Show full content for Email {i+1}", key=f"show_full_thread_{i}")
+                                if show_full:
+                                    st.markdown(f"**Full Content:**\n{body}")
+                            else:
+                                st.markdown(f"**Content:**\n{body}")
+                            
+                            st.markdown("---")
+                    
+                    # Now create a form for analyzing - separate from thread selection
+                    with st.form("analyze_thread_form"):
+                        st.subheader("Analyze Selected Thread")
+                        
+                        # Email selection
+                        st.write("Select emails to include in analysis:")
+                        include_emails = []
+                        for i, email in enumerate(selected_thread):
+                            include = st.checkbox(f"Include Email {i+1}", value=True, key=f"email_{i}")
+                            if include:
+                                include_emails.append(i)
+                        
+                        # This is the submit button
+                        analyze_thread_button = st.form_submit_button("Analyze Selected Emails")
+                    
+                    # Handle analysis OUTSIDE the form
+                    if analyze_thread_button:
+                        if include_emails:
+                            with st.spinner("Analyzing emails with AI..."):
+                                # Combine emails and analyze
+                                combined_text = "Combined Email Thread:\n\n"
+                                for i in include_emails:
+                                    email = selected_thread[i]
+                                    combined_text += f"Email {i+1}:\n"
+                                    combined_text += f"From: {email.get('from', 'Unknown')}\n"
+                                    combined_text += f"Subject: {email.get('subject', 'No Subject')}\n"
+                                    combined_text += f"Content: {email.get('body', '')}\n\n"
+                                
+                                # Analyze the combined text
+                                analysis_results = analyze_email(combined_text)
+                                
+                                # Store and proceed
+                                st.session_state.email_analysis = analysis_results
+                                st.session_state.email_analysis_done = True
+                                st.session_state.email_analysis_skipped = False
+                                st.rerun()
+                        else:
+                            st.warning("Please select at least one email to analyze.")
+                else:
+                    st.warning("No threads match your search. Try different terms.")
+            else:
+                st.warning("No email threads found. Try different search terms.")
+                
+                # Button to try again - outside any form
+                if st.button("Try Different Search"):
+                    st.session_state.pop("recent_emails", None)
+                    st.session_state.pop("email_threads", None)
+                    st.rerun()
+        
+        # Individual emails view (not threads)
+        else:
+            recent_emails = st.session_state.recent_emails
+            if recent_emails:
+                st.success(f"Found {len(recent_emails)} emails")
+                
+                # Create searchable dropdown for individual emails
+                email_search = st.text_input("Search within found emails:", 
+                                   help="Type to filter the email list below",
+                                   key="email_search_indiv")
+                
+                # Filter emails based on search
+                filtered_emails = []
+                filtered_indices = []
+                for i, email in enumerate(recent_emails):
+                    subject = email.get('subject', 'No Subject')
+                    sender = email.get('from', 'Unknown')
+                    option_text = f"{sender} - {subject}"
+                    
+                    if not email_search or email_search.lower() in option_text.lower():
+                        filtered_emails.append(option_text)
+                        filtered_indices.append(i)
+                
+                if filtered_emails:
+                    selected_email_option = st.selectbox(
+                        "Select Email to Analyze:",
+                        range(len(filtered_emails)),
+                        format_func=lambda i: filtered_emails[i]
+                    )
+                    
+                    # Get actual email index
+                    selected_email_idx = filtered_indices[selected_email_option]
+                    selected_email = recent_emails[selected_email_idx]
+                    
+                    # Show the selected email
+                    # For individual emails (replace the existing code)
+                    with st.expander("View Email Content", expanded=True):
+                        st.markdown(f"**From:** {selected_email.get('from', 'Unknown')}")
+                        st.markdown(f"**Subject:** {selected_email.get('subject', 'No Subject')}")
+                        st.markdown(f"**Date:** {selected_email.get('date', 'Unknown')}")
+                        
+                        body = selected_email.get('body', '')
+                        if len(body) > 200:
+                            st.markdown(f"**Content Preview:**\n{body[:200]}...")
+                            # Replace nested expander with checkbox
+                            show_full = st.checkbox("Show full content", key=f"show_full_email_{selected_email_idx}")
+                            if show_full:
+                                st.markdown(f"**Full Content:**\n{body}")
+                        else:
+                            st.markdown(f"**Content:**\n{body}")
+                    
+                    # Single email analysis button - outside forms
+                    if st.button("Analyze this Email", key="analyze_single_email"):
+                        with st.spinner("Analyzing email with AI..."):
+                            email_text = f"Subject: {selected_email.get('subject', '')}\n\nBody: {selected_email.get('body', '')}"
+                            analysis_results = analyze_email(email_text)
+                            
+                            # Store analysis results
+                            st.session_state.email_analysis = analysis_results
+                            st.session_state.email_analysis_done = True
+                            st.session_state.email_analysis_skipped = False
+                            st.rerun()
+                else:
+                    st.warning("No emails match your search. Try different terms.")
+            else:
+                st.warning("No emails found. Try different search terms.")
+                
+                # Button to try again - outside any form
+                if st.button("Try Different Search", key="try_diff_search_indiv"):
+                    st.session_state.pop("recent_emails", None)
+                    st.rerun()
+    
+    # Display analysis results if available
+    if "email_analysis" in st.session_state and not st.session_state.get("email_analysis_skipped", True):
+        analysis_results = st.session_state.email_analysis
+        
+        with st.container(border=True):
+            st.subheader("Email Analysis Summary")
+            
+            if isinstance(analysis_results, dict):
+                for key, value in analysis_results.items():
+                    if value and key != "error" and key != "raw_analysis":
+                        st.markdown(f"**{key.replace('_', ' ').title()}:** {value}")
+            else:
+                st.write(analysis_results)
+        
+        # Continue button - outside any form
+        if st.button("Continue to Parent Task Details", type="primary"):
+            st.rerun()
+
+def google_auth_page():
+    st.title("Google Services Authentication")
+    
+    # Check for both credential presence and backup flags
+    gmail_authenticated = "google_gmail_creds" in st.session_state
+    drive_authenticated = "google_drive_creds" in st.session_state
+    
+    # Check for backup auth completion flags
+    gmail_auth_complete = st.session_state.get("gmail_auth_complete", False)
+    drive_auth_complete = st.session_state.get("drive_auth_complete", False)
+    
+    # Add debug info to help troubleshoot
+    with st.sidebar.expander("Debug Info", expanded=False):
+        st.write("Session State Keys:", list(st.session_state.keys()))
+        st.write("Gmail Creds:", gmail_authenticated)
+        st.write("Drive Creds:", drive_authenticated)
+        st.write("Gmail Auth Complete Flag:", gmail_auth_complete)
+        st.write("Drive Auth Complete Flag:", drive_auth_complete)
+        
+        # Add a reset button
+        if st.button("Reset Google Auth Status (Debug)"):
+            keys_to_remove = [
+                'google_auth_complete', 
+                'google_gmail_creds', 
+                'google_drive_creds',
+                'gmail_auth_complete', 
+                'drive_auth_complete'
+            ]
+            for key in keys_to_remove:
+                if key in st.session_state:
+                    st.session_state.pop(key, None)
+            st.rerun()
+    
+    st.info("Please authenticate with Google to enable Gmail and Drive functionality.")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Gmail")
+        if gmail_authenticated or gmail_auth_complete:
+            st.success("✅ Authenticated")
+        else:
+            st.warning("⚠️ Not authenticated")
+            if st.button("Authenticate Gmail"):
+                with st.spinner("Connecting to Gmail..."):
+                    gmail_service = get_gmail_service()
+                    if gmail_service:
+                        # Set both the credential and backup flags
+                        st.session_state.gmail_auth_complete = True
+                        st.success("Gmail authentication successful!")
+                        st.rerun()
+    
+    with col2:
+        st.subheader("Google Drive")
+        if drive_authenticated or drive_auth_complete:
+            st.success("✅ Authenticated")
+        else:
+            st.warning("⚠️ Not authenticated")
+            if st.button("Authenticate Drive"):
+                with st.spinner("Connecting to Drive..."):
+                    drive_service = get_drive_service()
+                    if drive_service:
+                        # Set both the credential and backup flags
+                        st.session_state.drive_auth_complete = True
+                        st.success("Drive authentication successful!")
+                        st.rerun()
+    
+    # Check if both services are authenticated
+    if (gmail_authenticated or gmail_auth_complete) and (drive_authenticated or drive_auth_complete):
+        st.success("All services authenticated! You're ready to proceed.")
+        
+        # Set the main flag that the main() function checks
+        st.session_state.google_auth_complete = True
+        
+        if st.button("Continue to Dashboard", type="primary"):
+            # Ensure the flag is set before continuing
+            st.session_state.google_auth_complete = True
+            st.rerun()
+    else:
+        # Make sure google_auth_complete stays False until both services are authenticated
+        st.session_state.google_auth_complete = False
+
+def initialize_gmail_connection():
+    """
+    Initialize connection to Gmail API and handle authentication.
+    Returns the Gmail service object or None if connection fails.
+    """
+    try:
+        service = get_gmail_service()
+        if service:
+            return service
+        else:
+            st.error("Failed to initialize Gmail service. Check your credentials.")
+            return None
+    except Exception as e:
+        st.error(f"Error connecting to Gmail: {str(e)}")
+        return None
+    
+def designer_selection_page():
+    """
+    Page for selecting and booking designers for created tasks.
+    Displayed after task creation in both ad-hoc and retainer flows.
+    """
+    st.title("Designer Selection & Booking")
+
+    # Check if we have tasks to assign designers to
+    if "created_tasks" not in st.session_state or not st.session_state.created_tasks:
+        st.warning("No tasks available for designer assignment. Please create tasks first.")
+        # Clear the designer_selection flag to prevent coming back here
+        if "designer_selection" in st.session_state:
+            st.session_state.pop("designer_selection", None)
+            
+        if st.button("Return to Home"):
+            for key in ["form_type", "adhoc_sales_order_done", "adhoc_parent_input_done", 
+                      "retainer_parent_input_done", "subtask_index", "created_tasks", 
+                      "company_selection_done", "email_analysis_done", "email_analysis_skipped"]:
+                st.session_state.pop(key, None)
+            st.rerun()
+        return
+    
+    # Get Odoo connection
+    uid = st.session_state.odoo_uid
+    models = st.session_state.odoo_models
+    
+    # Display created tasks
+    st.subheader("Tasks Ready for Designer Assignment")
+    
+    tasks = st.session_state.created_tasks
+    parent_task_id = st.session_state.get("parent_task_id")
+    
+    # Display parent task info if available
+    if parent_task_id:
+        try:
+            # Fetch parent task details
+            parent_task_data = models.execute_kw(
+                ODOO_DB, uid, ODOO_PASSWORD,
+                'project.task', 'read',
+                [[parent_task_id]],
+                {'fields': ['name', 'x_studio_service_category_1', 'x_studio_service_category_2', 'description']}
+            )
+            
+            if parent_task_data:
+                parent_info = parent_task_data[0]
+                with st.container(border=True):
+                    st.markdown(f"**Parent Task:** {parent_info.get('name', f'ID: {parent_task_id}')}")
+                    st.markdown(f"**Parent Task ID:** {parent_task_id}")
+                    st.markdown(f"**Project:** {st.session_state.get('project', '')}")
+                    st.markdown(f"**Customer:** {st.session_state.get('customer', '')}")
+                    
+                    # Service categories if available
+                    if 'x_studio_service_category_1' in parent_info and parent_info['x_studio_service_category_1']:
+                        if isinstance(parent_info['x_studio_service_category_1'], list):
+                            st.markdown(f"**Service Category 1:** {parent_info['x_studio_service_category_1'][1]}")
+                        else:
+                            st.markdown(f"**Service Category 1:** {parent_info['x_studio_service_category_1']}")
+                    
+                    # Add Drive folder link if available
+                    if "drive_folder_link" in st.session_state:
+                        st.markdown(f"**📁 Google Drive Folder:** [Open Folder]({st.session_state.drive_folder_link})")
+        except Exception as e:
+            logger.warning(f"Could not fetch parent task details: {e}")
+            with st.container(border=True):
+                st.markdown(f"**Parent Task ID:** {parent_task_id}")
+                st.markdown(f"**Project:** {st.session_state.get('project', '')}")
+                st.markdown(f"**Customer:** {st.session_state.get('customer', '')}")
+                if "drive_folder_link" in st.session_state:
+                    st.markdown(f"**📁 Google Drive Folder:** [Open Folder]({st.session_state.drive_folder_link})")
+
+    # Load all designers once
+    with st.spinner("Loading designer information..."):
+        try:
+            designers_df = load_designers()
+            if designers_df.empty:
+                st.error("No designer information available. Please check the designer data file.")
+                return
+            
+            # Get all employees from planning for availability check
+            employees = get_all_employees_in_planning(models, uid)
+        except Exception as e:
+            st.error(f"Error loading designers: {str(e)}")
+            logger.error(f"Error loading designers: {e}", exc_info=True)
+            return
+    
+    # Iterate through each task to assign designers
+    for i, task in enumerate(tasks):
+        st.markdown(f"### Task {i+1}: {task.get('name', f'Task ID: {task.get('id', 'Unknown')}')}")
+        
+        # Get task details in a format suitable for designer matching
+        task_details = f"Task: {task.get('name', '')}\n"
+        task_details += f"Description: {task.get('description', '')}\n"
+        
+        # Add additional details if available
+        for field, label in [
+            ('x_studio_service_category_1', 'Service Category 1'),
+            ('x_studio_service_category_2', 'Service Category 2'),
+            ('x_studio_target_language', 'Target Language')
+        ]:
+            if field in task and task[field]:
+                if isinstance(task[field], list) and len(task[field]) >= 2:
+                    task_details += f"{label}: {task[field][1]}\n"
+                else:
+                    task_details += f"{label}: {task[field]}\n"
+        
+        # Add parent task information to task details for better matching
+        if parent_task_id:
+            task_details += f"Parent Task ID: {parent_task_id}\n"
+            task_details += f"Project: {st.session_state.get('project', '')}\n"
+            task_details += f"Customer: {st.session_state.get('customer', '')}\n"
+        
+        # Show current task status
+        current_status = "Not assigned"
+        if "designer_assigned" in task and task["designer_assigned"]:
+            current_status = f"Assigned to {task['designer_assigned']}"
+        
+        st.markdown(f"**Status:** {current_status}")
+        
+        # Designer suggestion and assignment section
+        with st.container(border=True):
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                # Only suggest if not already assigned
+                if "designer_assigned" not in task or not task["designer_assigned"]:
+                    if st.button(f"Suggest Designers for Task {i+1}", key=f"suggest_{task['id']}"):
+                        with st.spinner("Analyzing best designers..."):
+                            # Calculate due date for availability check
+                            due_date = None
+                            if 'x_studio_client_due_date_3' in task and task['x_studio_client_due_date_3']:
+                                due_date = task['x_studio_client_due_date_3']
+                            elif 'date_deadline' in task and task['date_deadline']:
+                                due_date = task['date_deadline']
+                            else:
+                                due_date = datetime.now() + pd.Timedelta(days=7)  # Default 1 week
+                            
+                            # Estimate task duration based on service categories and design units
+                            estimated_duration = 8  # Default 8 hours
+                            
+                            # Try to refine duration estimate based on design units if available
+                            design_units_sc1 = task.get('x_studio_total_no_of_design_units_sc1', 0)
+                            design_units_sc2 = task.get('x_studio_total_no_of_design_units_sc2', 0)
+                            
+                            if design_units_sc1 or design_units_sc2:
+                                # Simple formula: 2 hours per design unit, minimum 4 hours
+                                total_units = (design_units_sc1 or 0) + (design_units_sc2 or 0)
+                                if total_units > 0:
+                                    estimated_duration = max(4, total_units * 2)
+                            
+                            # Get ranked designers
+                            ranked_designers = rank_designers_by_skill_match(task_details, designers_df)
+                            
+                            # Filter by availability
+                            available_designers, unavailable_designers = filter_designers_by_availability(
+                                ranked_designers, models, uid, due_date, estimated_duration
+                            )
+                            
+                            # Store in session state for this task
+                            task_key = f"designer_options_{task['id']}"
+                            st.session_state[task_key] = {
+                                'available': available_designers,
+                                'unavailable': unavailable_designers,
+                                'task_details': task_details,
+                                'due_date': due_date,
+                                'duration': estimated_duration
+                            }
+                            
+                            # Get the full suggestion with availability info
+                            suggestion = suggest_best_designer_available(
+                                task_details, available_designers, unavailable_designers
+                            )
+                            
+                            # Store the suggestion
+                            st.session_state[f"designer_suggestion_{task['id']}"] = suggestion
+                            
+                            # Refresh to show results
+                            st.rerun()
+            
+            with col2:
+                # Show scheduling button if not already assigned
+                if "designer_assigned" not in task or not task["designer_assigned"]:
+                    if st.button(f"Schedule Task {i+1}", key=f"schedule_{task['id']}"):
+                        # This will be handled below after displaying all options
+                        st.session_state[f"schedule_task_{task['id']}"] = True
+                        st.rerun()
+        
+        # Display designer suggestions if available
+        designer_key = f"designer_options_{task['id']}"
+        suggestion_key = f"designer_suggestion_{task['id']}"
+        
+        if suggestion_key in st.session_state:
+            st.markdown("#### Designer Recommendation")
+            st.info(st.session_state[suggestion_key])
+        
+        # Display designer selection options if available
+        if designer_key in st.session_state:
+            options = st.session_state[designer_key]
+            
+            available_df = options['available']
+            
+            if not available_df.empty:
+                st.markdown("#### Available Designers")
+                
+                # Display a selection widget for available designers
+                designer_options = []
+                for _, row in available_df.iterrows():
+                    name = row['Name']
+                    score = row.get('match_score', 0)
+                    avail = row.get('available_from', '')
+                    
+                    if avail and isinstance(avail, pd.Timestamp):
+                        avail_str = avail.strftime("%Y-%m-%d %H:%M")
+                    else:
+                        avail_str = "Unknown"
+                        
+                    option_text = f"{name} (Match: {score:.0f}%, Available: {avail_str})"
+                    designer_options.append((name, option_text))
+                
+                # Selectbox for designer selection
+                if designer_options:
+                    selected_option = st.selectbox(
+                        "Select Designer:",
+                        options=range(len(designer_options)),
+                        format_func=lambda i: designer_options[i][1],
+                        key=f"designer_select_{task['id']}"
+                    )
+                    
+                    # Store the selected designer name
+                    selected_designer = designer_options[selected_option][0]
+                    st.session_state[f"selected_designer_{task['id']}"] = selected_designer
+            else:
+                st.warning("No designers are currently available for this task.")
+        
+        # Handle scheduling if requested
+        if f"schedule_task_{task['id']}" in st.session_state and st.session_state[f"schedule_task_{task['id']}"]:
+            selected_designer_key = f"selected_designer_{task['id']}"
+            
+            if selected_designer_key in st.session_state:
+                designer_name = st.session_state[selected_designer_key]
+                
+                # Try to find the available slot for this designer
+                designer_key = f"designer_options_{task['id']}"
+                if designer_key in st.session_state:
+                    options = st.session_state[designer_key]
+                    available_df = options['available']
+                    
+                    # Find the designer's row
+                    designer_row = available_df[available_df['Name'] == designer_name]
+                    
+                    if not designer_row.empty:
+                        # Get availability information
+                        available_from = designer_row.iloc[0].get('available_from')
+                        available_until = designer_row.iloc[0].get('available_until')
+                        
+                        # Schedule the task
+                        with st.spinner(f"Scheduling task for {designer_name}..."):
+                            # Find employee ID
+                            employee_id = find_employee_id(designer_name, employees)
+                            
+                            if employee_id:
+                                # Get parent task name if available
+                                parent_info = ""
+                                if parent_task_id:
+                                    try:
+                                        parent_task_data = models.execute_kw(
+                                            ODOO_DB, uid, ODOO_PASSWORD,
+                                            'project.task', 'read',
+                                            [[parent_task_id]],
+                                            {'fields': ['name']}
+                                        )
+                                        if parent_task_data:
+                                            parent_name = parent_task_data[0].get('name', f"Parent {parent_task_id}")
+                                            parent_info = f" | Parent: {parent_name}"
+                                    except Exception as e:
+                                        logger.warning(f"Could not fetch parent task name: {e}")
+                                        parent_info = f" | Parent ID: {parent_task_id}"
+                                
+                                # Get task name with project/customer context
+                                task_name = task.get('name', f"Task {task['id']}")
+                                project_name = st.session_state.get('project', '')
+                                customer_name = st.session_state.get('customer', '')
+                                
+                                planning_task_name = f"{task_name}{parent_info}"
+                                if project_name:
+                                    planning_task_name += f" | Project: {project_name}"
+                                if customer_name:
+                                    planning_task_name += f" | Customer: {customer_name}"
+                                
+                                # Convert to datetime if needed
+                                task_start = available_from
+                                task_end = available_until
+                                
+                                if isinstance(task_start, pd.Timestamp):
+                                    task_start = task_start.to_pydatetime()
+                                if isinstance(task_end, pd.Timestamp):
+                                    task_end = task_end.to_pydatetime()
+                                
+                                # Create the planning slot with full context
+                                slot_id = create_task(
+                                    models, uid, employee_id, 
+                                    planning_task_name, 
+                                    task_start, task_end,
+                                    parent_task_id=parent_task_id,
+                                    task_id=task['id']
+                                )
+                                
+                                if slot_id:
+                                    # Update the task with the assigned designer
+                                    with st.spinner(f"Updating task with designer {designer_name}..."):
+                                        # Create a more descriptive assignment note
+                                        assignment_note = (
+                                            f"Designer {designer_name} assigned by Task Management System\n"
+                                            f"Assignment Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+                                            f"Scheduled Time: {task_start.strftime('%Y-%m-%d %H:%M')} to {task_end.strftime('%Y-%m-%d %H:%M')}\n"
+                                            f"Planning Slot ID: {slot_id}"
+                                        )
+                                        
+                                        success = update_task_designer(models, uid, task['id'], designer_name, 
+                                                                      assignment_note=assignment_note, 
+                                                                      planning_slot_id=slot_id,
+                                                                      role="Designer")
+                                        
+                                        if success:
+                                            st.success(f"Successfully assigned {designer_name} to the task!")
+                                            # Update task in session state
+                                            task["designer_assigned"] = designer_name
+                                            task["planning_slot_id"] = slot_id
+                                            # Clean up session state keys for this task
+                                            st.session_state.pop(f"schedule_task_{task['id']}", None)
+                                        else:
+                                            st.error(f"Failed to update task with designer information. Please check Odoo configuration and field names.")
+                                            # Provide troubleshooting information
+                                            with st.expander("Troubleshooting Information"):
+                                                st.markdown("The system failed to update the task with the designer information. This could be due to:")
+                                                st.markdown("1. Missing fields in the Odoo task model")
+                                                st.markdown("2. Insufficient permissions for the current Odoo user")
+                                                st.markdown("3. Network connectivity issues")
+                                                st.markdown("4. The designer may not have a corresponding user record in Odoo")
+                                                st.markdown("\nCheck the application logs for more detailed error information.")
+                                else:
+                                    st.error(f"Failed to create planning slot for {designer_name}.")
+                            else:
+                                st.error(f"Could not find {designer_name} in the planning system.")
+                    else:
+                        st.error(f"Designer {designer_name} is no longer available.")
+            else:
+                st.warning("Please select a designer first.")
+                st.session_state.pop(f"schedule_task_{task['id']}", None)
+        
+        st.markdown("---")
+    
+    # Final success and navigation section
+    if all("designer_assigned" in task and task["designer_assigned"] for task in tasks):
+        st.success("All tasks have been assigned to designers!")
+        
+        if st.button("Complete Process", type="primary"):
+            # Clear ALL relevant session state keys
+            keys_to_clear = [
+                "form_type", 
+                "adhoc_sales_order_done", 
+                "adhoc_parent_input_done",
+                "retainer_parent_input_done", 
+                "subtask_index", 
+                "created_tasks",
+                "designer_selection",  # Make sure this flag is cleared
+                "parent_task_id",
+                "company_selection_done",
+                "email_analysis_done",
+                "email_analysis_skipped"
+            ]
+            
+            for key in keys_to_clear:
+                st.session_state.pop(key, None)
+            st.rerun()
+    else:
+        # If not all tasks are assigned, show appropriate message
+        assigned_count = sum(1 for task in tasks if "designer_assigned" in task and task["designer_assigned"])
+        st.info(f"{assigned_count} out of {len(tasks)} tasks have been assigned to designers.")
+        
+        if st.button("Complete Process (Skip Remaining Assignments)", type="primary"):
+            # Clear session state and return to home even if not all tasks are assigned
+            for key in ["form_type", "adhoc_sales_order_done", "adhoc_parent_input_done", 
+                      "retainer_parent_input_done", "subtask_index", "created_tasks",
+                      "designer_selection", "parent_task_id"]:
+                st.session_state.pop(key, None)
+            st.rerun()
+
+
+# -------------------------------
+# MAIN
+# -------------------------------
+
+def main():
+    """
+    Entry‑point for the Streamlit Task‑Management app.
+    ‑   Ensures the user is logged‑in *before* we complete any Google OAuth
+    ‑   Persists OAuth codes that arrive early, then processes them post‑login
+    """
+    from session_manager import SessionManager
+    SessionManager.initialize_session()
+
+    import streamlit as st
+
+    inject_custom_css()
+
+
+    # Set logo position based on login status
+    if st.session_state.get("logged_in", False):
+        # For logged-in pages, use top-right position
+        add_logo(position="top-right", width=120)
+    else:
+        # For login page, this will be handled in login_page()
+        pass
+    # ------------------------------------------------------------------
+    # 1)  Capture *early* Google OAuth callback codes
+    # ------------------------------------------------------------------
+    if "code" in st.query_params:
+        # Stash it until the user finishes the TMS login
+        st.session_state.pending_oauth_code = st.query_params["code"]
+        st.query_params.clear()               # keeps the URL tidy
+
+    # ------------------------------------------------------------------
+    # 2)  Admin “system debug” shortcut (unchanged)
+    # ------------------------------------------------------------------
+    if inject_debug_page():                   # noqa: F821  (defined earlier in app.py)
+        return
+
+    # ------------------------------------------------------------------
+    # 3)  Sidebar is always visible
+    # ------------------------------------------------------------------
+    render_sidebar()                          # noqa: F821
+
+    # Small live‑state panel
+    st.sidebar.write("Debug Info:")
+    st.sidebar.write(f"Logged in: {st.session_state.get('logged_in', False)}")
+    st.sidebar.write(f"Google Auth Complete: {st.session_state.get('google_auth_complete', False)}")
+    st.sidebar.write(f"Google Gmail Creds: {'google_gmail_creds' in st.session_state}")
+    st.sidebar.write(f"Google Drive Creds: {'google_drive_creds' in st.session_state}")
+
+    # ------------------------------------------------------------------
+    # 4)  Login gate
+    # ------------------------------------------------------------------
+    if not st.session_state.get("logged_in", False):
+        login_page()                          # noqa: F821
+        return
+
+    # ------------------------------------------------------------------
+    # 5)  *After* successful login, finish any pending OAuth handshake
+    # ------------------------------------------------------------------
+    if "pending_oauth_code" in st.session_state:
+        code = st.session_state.pop("pending_oauth_code")
+
+        from google_auth import handle_oauth_callback  # local import avoids circular refs
+        st.info("Finishing Google authentication…")
+        success = handle_oauth_callback(code)
+
+        if success:
+            st.success("Google account linked – token saved to Supabase.")
+        else:
+            st.error("Google authentication failed. Please try again.")
+
+        st.rerun()     # refresh state / UI regardless of outcome
+        return
+
+    # ------------------------------------------------------------------
+    # 6)  Optional Auth‑debug / Google‑auth pages (unchanged)
+    # ------------------------------------------------------------------
+    if st.session_state.get("show_google_auth", False):
+        google_auth_page()                    # noqa: F821
+        if st.button("Return to Main Page"):
+            st.session_state.pop("show_google_auth", None)
+            st.rerun()
+        return
+    elif st.session_state.get("debug_mode") == "auth_debug":
+        auth_debug_page()                     # noqa: F821
+
+    # Additional debug mode (task‑fields) — unchanged
+    if st.session_state.get("debug_mode") == "task_fields":
+        debug_task_fields()                   # noqa: F821
+        if st.button("Return to Normal Mode"):
+            st.session_state.pop("debug_mode")
+            st.rerun()
+        return
+
+    # ------------------------------------------------------------------
+    # 7)  Session‑validation & main workflow (unchanged)
+    # ------------------------------------------------------------------
+    if not validate_session():                # noqa: F821
+        login_page()
+        return
+    
+
+    # Main content routing (identical to previous logic)
+    if "form_type" not in st.session_state:
+        type_selection_page()                 # noqa: F821
+    else:
+        # Designer‑selection page shown after tasks are created
+        if st.session_state.get("designer_selection"):
+            designer_selection_page()         # noqa: F821
+        elif st.session_state.form_type == "Via Sales Order":
+            if "adhoc_parent_input_done" in st.session_state:
+                adhoc_subtask_page()
+            elif "adhoc_sales_order_done" in st.session_state:
+                if "email_analysis_done" in st.session_state:
+                    adhoc_parent_task_page()
+                else:
+                    email_analysis_page()
+            elif "company_selection_done" in st.session_state:
+                sales_order_page()
+            else:
+                company_selection_page()
+        elif st.session_state.form_type == "Via Project":
+            if "retainer_parent_input_done" in st.session_state:
+                retainer_subtask_page()       # noqa: F821
+            else:
+                retainer_parent_task_page()   # noqa: F821
+
+if __name__ == "__main__":
     main()
