@@ -1443,10 +1443,10 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     has_timesheet = hours_logged > 0
             
             # # Last resort: check if designer has ANY timesheet for the day
-            # if not has_timesheet and resource_name != "Unknown":
-            #     if resource_name in designer_name_only_to_timesheet:
-            #         hours_logged = designer_name_only_to_timesheet[resource_name]['hours']
-            #         has_timesheet = hours_logged > 0
+            if not has_timesheet and resource_name != "Unknown":
+                if resource_name in designer_name_only_to_timesheet:
+                    hours_logged = designer_name_only_to_timesheet[resource_name]['hours']
+                    has_timesheet = hours_logged > 0
             
             # Get other slot info for display
             slot_name = slot.get('name', 'Unnamed Slot')
