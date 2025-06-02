@@ -1195,6 +1195,12 @@ def send_manager_notifications(designers, selected_date, reference_date=None):
         logger.error(f"Error sending manager notifications: {e}\n{error_details}")
         return False, 0, 0
 
+def normalize_name(name):
+    """Normalize name for matching: lowercase, trim, remove extra spaces"""
+    if not name:
+        return ""
+    return " ".join(name.lower().strip().split())
+
 def generate_missing_timesheet_report(selected_date, shift_status_filter=None, send_email=False, send_designer_emails=False):
     """
     Generate report of planning slots without timesheet entries for a date range from reference_date to selected_date
@@ -1318,8 +1324,9 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     user_id = entry['user_id']
             
             if employee_name:
-                # Create a unique key combining employee name, task, and project
-                key = (employee_name, task_id, project_id)
+                # Normalize the name for consistent matching
+                normalized_name = normalize_name(employee_name)
+                key = (normalized_name, task_id, project_id)
                 
                 if key in designer_name_to_timesheet:
                     designer_name_to_timesheet[key]['hours'] += entry.get('unit_amount', 0)
@@ -1332,39 +1339,9 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                         'user_ids': {user_id} if user_id else set()
                     }
         
-        # Also create a name-only mapping as a last resort
-        designer_name_only_to_timesheet = {}
-        for entry in timesheet_entries:
-            employee_name = None
-            
-            # Get employee name
-            if 'employee_id' in entry and entry['employee_id'] and isinstance(entry['employee_id'], list) and len(entry['employee_id']) > 1:
-                employee_name = entry['employee_id'][1]
-            
-            # Get user ID (who actually created/logged the entry)
-            user_id = None
-            if 'user_id' in entry and entry['user_id']:
-                if isinstance(entry['user_id'], list):
-                    user_id = entry['user_id'][0]
-                elif isinstance(entry['user_id'], int):
-                    user_id = entry['user_id']
-            
-            if employee_name:
-                if employee_name in designer_name_only_to_timesheet:
-                    designer_name_only_to_timesheet[employee_name]['hours'] += entry.get('unit_amount', 0)
-                    designer_name_only_to_timesheet[employee_name]['entries'].append(entry)
-                    designer_name_only_to_timesheet[employee_name]['user_ids'].add(user_id)
-                else:
-                    designer_name_only_to_timesheet[employee_name] = {
-                        'hours': entry.get('unit_amount', 0),
-                        'entries': [entry],
-                        'user_ids': {user_id} if user_id else set()
-                    }
-        
         # Log the mappings to help with debugging
         logger.info(f"Found {len(resource_task_to_timesheet)} resource+task+project timesheet combinations")
         logger.info(f"Found {len(designer_name_to_timesheet)} name+task+project timesheet combinations")
-        logger.info(f"Found {len(designer_name_only_to_timesheet)} unique designer names with timesheets")
                 
         # Step 5: Find resource IDs from employee IDs
         # This is needed because planning uses resource.resource while timesheet uses hr.employee
@@ -1412,16 +1389,35 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
             else:
                 project_name = "Unknown"
             
-            # Check if this resource/employee has logged time for this specific task/project using tiered approach
+            # Get slot datetime info FIRST (before using it)
+            start_datetime = slot.get('start_datetime', '')
+            end_datetime = slot.get('end_datetime', '')
+            
+            # Extract task date from slot data
+            task_date = None
+            if start_datetime and isinstance(start_datetime, str):
+                try:
+                    task_date = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M:%S").date()
+                except:
+                    task_date = selected_date
+            else:
+                task_date = selected_date
+            
+            # Initialize tracking variables
             has_timesheet = False
-            hours_logged = 0.0
+            date_specific_hours = 0.0
             
             # First check: exact match by resource_id + task_id + project_id
             key = (resource_id, task_id, project_id)
             if key in resource_task_to_timesheet:
-                hours_logged = resource_task_to_timesheet[key]['hours']
+                # Check for entries on the specific date
+                if task_date:
+                    formatted_task_date = task_date.strftime("%Y-%m-%d")
+                    for entry in resource_task_to_timesheet[key]['entries']:
+                        if entry.get('date', '') == formatted_task_date:
+                            date_specific_hours += entry.get('unit_amount', 0)
                 
-                # Get the user_id associated with the resource (if available)
+                # Get the user_id associated with the resource
                 resource_user_id = None
                 if resource_id in ref_data.get('resources', {}) and ref_data['resources'][resource_id].get('user_id'):
                     resource_details = ref_data['resources'][resource_id]
@@ -1430,23 +1426,31 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     elif isinstance(resource_details['user_id'], int):
                         resource_user_id = resource_details['user_id']
                 
-                # Only consider it a valid timesheet if hours logged are greater than 0
-                # AND the entry was created by the designer (their user_id is in the user_ids set)
+                # Verify user and check hours
                 user_ids = resource_task_to_timesheet[key]['user_ids']
-                has_timesheet = specific_date_has_timesheet
+                user_verified = resource_user_id in user_ids if resource_user_id else False
+                
+                # Set has_timesheet based on BOTH conditions
+                has_timesheet = (date_specific_hours > 0) and user_verified
             
-            # # Second check: try matching by name + task_id + project_id
+            # Second check: try matching by name + task_id + project_id
             if not has_timesheet and resource_name != "Unknown":
-                name_key = (resource_name, task_id, project_id)
+                normalized_resource_name = normalize_name(resource_name)
+                name_key = (normalized_resource_name, task_id, project_id)
+                
                 if name_key in designer_name_to_timesheet:
-                    hours_logged = designer_name_to_timesheet[name_key]['hours']
-                    has_timesheet = hours_logged > 0
+                    # Reset date_specific_hours for this check
+                    date_specific_hours = 0.0
+                    if task_date:
+                        formatted_task_date = task_date.strftime("%Y-%m-%d")
+                        for entry in designer_name_to_timesheet[name_key]['entries']:
+                            if entry.get('date', '') == formatted_task_date:
+                                date_specific_hours += entry.get('unit_amount', 0)
+                    
+                    # For name-based matching, we're more lenient (no user verification)
+                    has_timesheet = date_specific_hours > 0
             
-            # # Last resort: check if designer has ANY timesheet for the day
-            if not has_timesheet and resource_name != "Unknown":
-                if resource_name in designer_name_only_to_timesheet:
-                    hours_logged = designer_name_only_to_timesheet[resource_name]['hours']
-                    has_timesheet = hours_logged > 0
+            # REMOVED the third fallback that accepts ANY timesheet - it was too permissive
             
             # Get other slot info for display
             slot_name = slot.get('name', 'Unnamed Slot')
@@ -1466,9 +1470,6 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     client_success_name = ref_data['users'][create_uid].get('name', 'Unknown')
             
             # Format start and end times for display
-            start_datetime = slot.get('start_datetime', '')
-            end_datetime = slot.get('end_datetime', '')
-            
             start_time = "Unknown"
             end_time = "Unknown"
             
@@ -1493,18 +1494,6 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
             # Get time allocation
             allocated_hours = slot.get('allocated_hours', 0.0)
             
-            # Extract task date from slot data
-            task_date = None
-            if start_datetime and isinstance(start_datetime, str):
-                try:
-                    # Convert string to datetime
-                    task_date = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M:%S").date()
-                except:
-                    # If parsing fails, use the selected date
-                    task_date = selected_date
-            else:
-                # Fallback if no valid start_datetime
-                task_date = selected_date
             # Calculate daily allocated hours for this specific date
             daily_allocated_hours = allocated_hours
             if start_datetime and end_datetime and isinstance(start_datetime, str) and isinstance(end_datetime, str):
@@ -1516,7 +1505,8 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     # Calculate the number of work days (each calendar day counts as one full day)
                     start_date = start_dt.date()
                     end_date = end_dt.date()
-                    total_days = (end_date - start_date).days + 1  # +1 to include both start and end dates                    
+                    total_days = (end_date - start_date).days + 1  # +1 to include both start and end dates
+                    
                     # Only adjust allocation if task spans multiple days (more than 1 day)
                     if total_days > 1.0:
                         # Divide the total hours by the number of days (simple approach)
@@ -1524,10 +1514,11 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                         logger.info(f"Task spans {total_days:.2f} days. Adjusted allocated hours from {allocated_hours} to {daily_allocated_hours:.2f} per day")
                 except Exception as e:
                     logger.warning(f"Error calculating daily hours: {e}")
-                        # Get sub task link
+            
+            # Get sub task link
             sub_task_link = ""
             raw_sub_task_link = slot.get('x_studio_sub_task_link', False)
-            logger.info(f"Original sub_task_link: {sub_task_link}, Type: {type(sub_task_link)}")
+            logger.info(f"Original sub_task_link: {raw_sub_task_link}, Type: {type(raw_sub_task_link)}")
 
             # If we have a valid relation field, construct a proper Odoo URL
             if isinstance(raw_sub_task_link, list) and len(raw_sub_task_link) > 0:
@@ -1539,38 +1530,8 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     logger.info(f"Constructed Odoo URL for task: {sub_task_link}")
             else:
                 # Use the original handling for other cases
-                sub_task_link = raw_sub_task_link
-            # For multi-day tasks, we need to check timesheet entries for the specific day
-            specific_date_has_timesheet = False
-
-            # Only consider timesheet entries for the exact day of this slot
-            date_specific_entries = []
-            if task_date:
-                formatted_task_date = task_date.strftime("%Y-%m-%d")
-                
-                # If this is a matching resource_id, task_id, project_id combination
-                key = (resource_id, task_id, project_id)
-                if key in resource_task_to_timesheet:
-                    # Filter entries by this specific date
-                    for entry in resource_task_to_timesheet[key]['entries']:
-                        entry_date = entry.get('date', '')
-                        if entry_date == formatted_task_date:
-                            date_specific_entries.append(entry)
-                            
-                    # Only consider it a valid timesheet if there are entries for THIS date
-                    specific_date_has_timesheet = len(date_specific_entries) > 0 and sum(e.get('unit_amount', 0) for e in date_specific_entries) > 0
-                    
-                # Also check by name
-                if not specific_date_has_timesheet and resource_name != "Unknown":
-                    name_key = (resource_name, task_id, project_id)
-                    if name_key in designer_name_to_timesheet:
-                        # Filter entries by this specific date
-                        for entry in designer_name_to_timesheet[name_key]['entries']:
-                            entry_date = entry.get('date', '')
-                            if entry_date == formatted_task_date:
-                                date_specific_entries.append(entry)
-                                
-                        specific_date_has_timesheet = len(date_specific_entries) > 0 and sum(e.get('unit_amount', 0) for e in date_specific_entries) > 0
+                sub_task_link = str(raw_sub_task_link) if raw_sub_task_link else ""
+            
             # Ensure we have a valid URL format if it's not empty
             if sub_task_link and isinstance(sub_task_link, str):
                 # Add the protocol if missing but looks like a URL
@@ -1578,6 +1539,7 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     if '.' in sub_task_link and not sub_task_link.startswith('www.'):
                         sub_task_link = 'https://' + sub_task_link
                         logger.info(f"Added https:// to link: {sub_task_link}")
+            
             # Calculate days since task date for urgency
             reference_point = selected_date
             days_since_task = (reference_point - task_date).days
@@ -1592,14 +1554,12 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     'Project': str(project_name),
                     'Client Success Member': str(client_success_name),
                     'Task': str(task_name),
-                    # 'Slot Name': str(slot_name),
                     'Start Time': str(start_time),
                     'End Time': str(end_time),
                     'Allocated Hours': float(daily_allocated_hours),
-                    # 'Shift Status': str(shift_status),
                     'Days Overdue': int(days_since_task),
                     'Urgency': 'High' if days_since_task >= 2 else ('Medium' if days_since_task == 1 else 'Low'),
-                    'Sub_Task_Link': str(sub_task_link)  # Add this line
+                    'Sub_Task_Link': str(sub_task_link)
                 }
                 
                 report_data.append(task_data)
@@ -1624,23 +1584,7 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
             df = pd.DataFrame(report_data)
             
             # Count missing entries based on what's in report_data when not in debug mode
-            missing_count = len(report_data) if not st.session_state.debug_mode else len([slot for slot in planning_slots if not (
-                # First check: exact match by resource_id + task_id + project_id
-                (slot.get('resource_id') and slot.get('task_id') and slot.get('project_id') and 
-                (slot['resource_id'][0], slot['task_id'][0], slot['project_id'][0]) in resource_task_to_timesheet and
-                resource_task_to_timesheet[(slot['resource_id'][0], slot['task_id'][0], slot['project_id'][0])]['hours'] > 0) or
-                
-                # Second check: try matching by name + task_id + project_id
-                (slot.get('resource_id') and slot.get('task_id') and slot.get('project_id') and
-                len(slot['resource_id']) > 1 and
-                (slot['resource_id'][1], slot['task_id'][0], slot['project_id'][0]) in designer_name_to_timesheet and
-                designer_name_to_timesheet[(slot['resource_id'][1], slot['task_id'][0], slot['project_id'][0])]['hours'] > 0) or
-                
-                # Last resort: check if designer has ANY timesheet for the day
-                (slot.get('resource_id') and len(slot['resource_id']) > 1 and
-                slot['resource_id'][1] in designer_name_only_to_timesheet and
-                designer_name_only_to_timesheet[slot['resource_id'][1]]['hours'] > 0)
-            )])
+            missing_count = len(report_data) if not st.session_state.debug_mode else len(report_data)
             
             # Send email report if requested
             if send_email and (missing_count > 0 or st.session_state.debug_mode):
@@ -1767,7 +1711,7 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     error_details = traceback.format_exc()
                     logger.error(f"Error sending Teams webhook notifications: {e}\n{error_details}")
                     st.warning(f"Error sending Teams webhook notifications: {e}")
-            # Add after the Teams webhook notification section
+            
             # Send Teams direct messages if enabled
             if st.session_state.teams_direct_msg_enabled and (missing_count > 0 or st.session_state.debug_mode):
                 try:
@@ -1782,8 +1726,7 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                     error_details = traceback.format_exc()
                     logger.error(f"Error sending Teams direct messages: {e}\n{error_details}")
                     st.warning(f"Error sending Teams direct messages: {e}")
-            # Add right after the Teams direct messages section in the generate_missing_timesheet_report function 
-            # (around line 1155, after "st.warning(f"Failed to send Teams direct messages to {fail_count} designers")")
+            
             # Send manager notifications if enabled
             if st.session_state.manager_emails_enabled and (missing_count > 0 or st.session_state.debug_mode):
                 try:
@@ -1826,7 +1769,7 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
         st.error(f"Error generating report: {e}")
         st.session_state.last_error = error_details
         return pd.DataFrame(), 0, len(timesheet_entries) if 'timesheet_entries' in locals() else 0
-
+    
 def send_teams_webhook_notification(
         designer_name: str,
         webhook_url: str,
