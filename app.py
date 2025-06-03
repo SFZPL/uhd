@@ -1219,6 +1219,18 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
         # Step 1: Get all planning slots for the date range (reference_date to selected_date) with optional shift status filter
         planning_slots = get_planning_slots(models, uid, odoo_db, odoo_password, reference_date, selected_date, shift_status_filter)
         
+        # ADD THIS DEBUG SECTION:
+        if st.session_state.debug_mode:
+            st.warning("🔍 DEBUG: Checking first 3 planning slots")
+            debug_container = st.container()
+            with debug_container:
+                for i, slot in enumerate(planning_slots[:3]):
+                    with st.expander(f"Planning Slot {i+1}"):
+                        st.write(f"**Resource:** {slot.get('resource_id')}")
+                        st.write(f"**Task ID:** {slot.get('task_id')}")
+                        st.write(f"**Project ID:** {slot.get('project_id')}")
+                        st.write(f"**Start:** {slot.get('start_datetime')}")
+
         # Post-process to ensure only slots with the correct shift status are included
         # This adds a second layer of filtering in case the Odoo query didn't filter properly
         if shift_status_filter:
@@ -1232,6 +1244,19 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
         
         # Step 2: Get all timesheet entries for the date range
         timesheet_entries = get_timesheet_entries(models, uid, odoo_db, odoo_password, reference_date, selected_date)
+
+        # ADD THIS DEBUG SECTION:
+        if st.session_state.debug_mode:
+            st.warning("🔍 DEBUG: Checking first 3 timesheet entries")
+            debug_container2 = st.container()
+            with debug_container2:
+                for i, entry in enumerate(timesheet_entries[:3]):
+                    with st.expander(f"Timesheet Entry {i+1}"):
+                        st.write(f"**Employee:** {entry.get('employee_id')}")
+                        st.write(f"**Task ID:** {entry.get('task_id')}")
+                        st.write(f"**Project ID:** {entry.get('project_id')}")
+                        st.write(f"**Date:** {entry.get('date')}")
+                        st.write(f"**Hours:** {entry.get('unit_amount')}")
         
         # Step 3: Get reference data
         ref_data = get_references_data(models, uid, odoo_db, odoo_password)
