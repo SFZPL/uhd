@@ -1458,6 +1458,26 @@ def generate_missing_timesheet_report(selected_date, shift_status_filter=None, s
                 # Set has_timesheet based on BOTH conditions
                 has_timesheet = (date_specific_hours > 0) and user_verified
             
+            # Here
+            # ADD THIS: Special handling for planning slots without tasks
+            if not has_timesheet and resource_id and project_id and task_id is None:
+                # Planning slot has no task, so match by resource + project only
+                for key in resource_task_to_timesheet:
+                    if key[0] == resource_id and key[2] == project_id:
+                        # Check date-specific entries
+                        date_specific_hours = 0.0
+                        if task_date:
+                            formatted_task_date = task_date.strftime("%Y-%m-%d")
+                            for entry in resource_task_to_timesheet[key]['entries']:
+                                if entry.get('date', '') == formatted_task_date:
+                                    date_specific_hours += entry.get('unit_amount', 0)
+                        
+                        if date_specific_hours > 0:
+                            has_timesheet = True
+                            if st.session_state.debug_mode:
+                                st.info(f"✅ Matched {resource_name} on project without specific task assignment")
+                            break
+
             # Second check: try matching by name + task_id + project_id
             if not has_timesheet and resource_name != "Unknown":
                 normalized_resource_name = normalize_name(resource_name)
