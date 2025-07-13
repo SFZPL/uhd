@@ -60,7 +60,7 @@ if 'last_error' not in st.session_state:
 if 'email_enabled' not in st.session_state:
     st.session_state.email_enabled = True
 if 'email_recipient' not in st.session_state:
-    st.session_state.email_recipient = odoo_username  # Default to the Odoo username (usually an email)
+    st.session_state.email_recipient = "sanad.zaqtan@prezlab.com, karmel.stanbouli@prezlab.com, abdelrauof.shamout@prezlab.com"  # Default to the specified list
 if 'designer_emails_enabled' not in st.session_state:
     st.session_state.designer_emails_enabled = True
 if 'designer_email_mapping' not in st.session_state:
@@ -123,7 +123,7 @@ if hasattr(st.secrets, "DESIGNER_EMAILS"):
 
 # Add reference date for cutoff of historical tasks
 if 'reference_date' not in st.session_state:
-    st.session_state.reference_date = date.today() - timedelta(days=7)  # Default to 7 days ago
+    st.session_state.reference_date = date(2025, 6, 1)  # Default to 2025/06/01
 
 # Add additional initialization for email settings from secrets if they exist
 if hasattr(st.secrets, "EMAIL"):
@@ -2384,9 +2384,11 @@ def main():
     col1, col2, col3 = st.columns(3)
     
     with col1:
+        # Set default select end date to yesterday, but allow user to change
+        default_end_date = datetime.now().date() - timedelta(days=1)
         selected_date = st.date_input(
             "Select End Date", 
-            datetime.now().date(),  # Default to yesterday
+            value=default_end_date,
             help="Choose the end date for the report range (reference date to this date)"
         )
     
